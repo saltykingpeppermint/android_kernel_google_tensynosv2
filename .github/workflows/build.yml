@@ -1,0 +1,316 @@
+name: Build Tensor G3 Kernel with KernelSU Next
+
+on:
+  push:
+    branches: [main, 16.0.0-sultan]
+    tags: ['v*']
+  pull_request:
+    branches: [main, 16.0.0-sultan]
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: 'Build type'
+        required: true
+        default: 'release'
+        type: choice
+        options:
+          - release
+          - debug
+      clean_build:
+        description: 'Clean build'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  KERNEL_DIR: ${{ github.workspace }}
+  BUILD_DIR: ${{ github.workspace }}/out
+  DIST_DIR: ${{ github.workspace }}/dist
+
+jobs:
+  build:
+    name: Build Kernel (${{ matrix.build_type }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        build_type: [release]
+        include:
+          - build_type: release
+            debug: false
+          - build_type: debug
+            debug: true
+
+    steps:
+      - name: Checkout kernel source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Checkout KernelSU Next
+        uses: actions/checkout@v4
+        with:
+          repository: KernelSU-Next/KernelSU-Next
+          ref: dev
+          path: kernelsu-next
+          submodules: true
+
+      - name: Setup build environment
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc \
+            bison \
+            build-essential \
+            ccache \
+            cpio \
+            flex \
+            git \
+            libelf-dev \
+            libncurses5-dev \
+            libssl-dev \
+            python3 \
+            python3-distutils \
+            python3-dev \
+            unzip \
+            wget \
+            zip \
+            zlib1g-dev
+
+      - name: Install LLVM/Clang
+        run: |
+          # Install specific Clang version for Android kernel building
+          wget -q https://github.com/llvm/llvm-project/releases/download/llvmorg-17.0.6/clang+llvm-17.0.6-x86_64-linux-gnu-ubuntu-22.04.tar.xz
+          tar -xf clang+llvm-17.0.6-x86_64-linux-gnu-ubuntu-22.04.tar.xz
+          sudo mv clang+llvm-17.0.6-x86_64-linux-gnu-ubuntu-22.04 /opt/llvm
+          echo "/opt/llvm/bin" >> $GITHUB_PATH
+          clang --version
+
+      - name: Install cross-compilation toolchain
+        run: |
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+          aarch64-linux-gnu-gcc --version
+
+      - name: Configure kernel
+        run: |
+          cd ${{ env.KERNEL_DIR }}
+          source build.config.common
+          source google-devices/zuma/build.config.zuma
+          
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+          export CLANG_TRIPLE=aarch64-linux-gnu-
+          export LLVM=1
+          export LLVM_IAS=1
+          
+          make O=${{ env.BUILD_DIR }} zuma_defconfig
+          
+          # Enable KernelSU Next and power saving exclusions
+          ./scripts/config --file ${{ env.BUILD_DIR }}/.config \
+            --enable KSU \
+            --enable KPROBES \
+            --enable EXT4_FS \
+            --enable BLUETOOTH_POWERSAVE_EXCLUDE \
+            --enable WIFI_POWERSAVE_EXCLUDE \
+            --enable DEBUG_REBOOT \
+            --set-str LOCALVERSION "-kernelsu-next"
+          
+          make O=${{ env.BUILD_DIR }} olddefconfig
+
+      - name: Build kernel
+        run: |
+          cd ${{ env.KERNEL_DIR }}
+          
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+          export CLANG_TRIPLE=aarch64-linux-gnu-
+          export LLVM=1
+          export LLVM_IAS=1
+          
+          if [ "${{ matrix.debug }}" == "true" ]; then
+            export KBUILD_BUILD_HOST="github-actions"
+            export KBUILD_BUILD_USER="builder"
+            export KBUILD_BUILD_TIMESTAMP=$(date -u +'%Y-%m-%d %H:%M:%S')
+            KCFLAGS="${KCFLAGS} -g -O0"
+          fi
+          
+          make O=${{ env.BUILD_DIR }} -j$(nproc) \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            KCFLAGS="${KCFLAGS}" \
+            Image
+
+      - name: Build DTBs
+        run: |
+          cd ${{ env.KERNEL_DIR }}
+          export ARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export LLVM=1
+          export LLVM_IAS=1
+          make O=${{ env.BUILD_DIR }} -j$(nproc) dtbs
+
+      - name: Build modules
+        run: |
+          cd ${{ env.KERNEL_DIR }}
+          export ARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export LLVM=1
+          export LLVM_IAS=1
+          make O=${{ env.BUILD_DIR }} -j$(nproc) modules
+          make O=${{ env.BUILD_DIR }} INSTALL_MOD_PATH=${{ env.BUILD_DIR }}/modules modules_install
+          
+          # Strip modules
+          find ${{ env.BUILD_DIR }}/modules -name "*.ko" -exec aarch64-linux-gnu-strip --strip-unneeded {} \; 2>/dev/null || true
+
+      - name: Create AnyKernel3 flashable zip
+        run: |
+          cd ${{ env.KERNEL_DIR }}
+          
+          # Clone AnyKernel3
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git anykernel3
+          
+          # Clean
+          rm -f anykernel3/Image
+          rm -f anykernel3/dtb
+          rm -rf anykernel3/modules
+          
+          # Copy kernel image
+          cp ${{ env.BUILD_DIR }}/arch/arm64/boot/Image anykernel3/
+          
+          # Copy DTBs
+          mkdir -p anykernel3/dtb
+          cp ${{ env.BUILD_DIR }}/arch/arm64/boot/dts/google/*.dtb anykernel3/dtb/ 2>/dev/null || true
+          
+          # Copy modules
+          mkdir -p anykernel3/modules
+          cp -r ${{ env.BUILD_DIR }}/modules/lib/modules/* anykernel3/modules/ 2>/dev/null || true
+          
+          # Create anykernel.sh
+          cat > anykernel3/anykernel.sh << 'EOF'
+# AnyKernel3 setup
+properties() {
+    kernel.string=Tensor G3 KernelSU Next
+    do.devicecheck=1
+    do.modules=1
+    do.cleanup=1
+    do.cleanuponabort=1
+    device.name1=zuma
+    device.name2=shusky
+    device.name3=husky
+    device.name4=akita
+    device.name5=tokay
+    supported.versions=14
+    supported.patchlevels=
+}
+
+. tools/ak3-core.sh
+
+dump_boot
+write_boot
+
+if [ "$do.modules" == 1 ]; then
+    for module in modules/*; do
+        if [ -f "$module" ]; then
+            ui_print "Installing $(basename $module)..."
+            cp -f "$module" "$ramdisk/lib/modules/"
+        fi
+    done
+fi
+EOF
+          
+          # Create zip
+          cd anykernel3
+          zip -r9 ${{ env.DIST_DIR }}/KernelSU-Next-zuma-${{ matrix.build_type }}-${{ github.run_number }}.zip . -x ".git*" -x "README.md" -x "*.zip"
+
+      - name: Upload kernel artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-${{ matrix.build_type }}
+          path: |
+            ${{ env.DIST_DIR }}/*
+            ${{ env.BUILD_DIR }}/arch/arm64/boot/Image
+            ${{ env.BUILD_DIR }}/.config
+            ${{ env.BUILD_DIR }}/vmlinux
+          retention-days: 30
+
+      - name: Create release (on tag push)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            ${{ env.DIST_DIR }}/*.zip
+            ${{ env.DIST_DIR }}/Image
+            ${{ env.DIST_DIR }}/config
+            ${{ env.DIST_DIR }}/vmlinux
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+
+  test:
+    name: Test Kernel Config
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: kernel-release
+          path: artifacts
+
+      - name: Verify kernel config
+        run: |
+          # Check that required configs are enabled
+          grep -q "CONFIG_KSU=y" artifacts/config && echo "✓ KernelSU enabled" || (echo "✗ KernelSU not enabled" && exit 1)
+          grep -q "CONFIG_KPROBES=y" artifacts/config && echo "✓ Kprobes enabled" || (echo "✗ Kprobes not enabled" && exit 1)
+          grep -q "CONFIG_EXT4_FS=y" artifacts/config && echo "✓ EXT4 enabled" || (echo "✗ EXT4 not enabled" && exit 1)
+          grep -q "CONFIG_BLUETOOTH_POWERSAVE_EXCLUDE=y" artifacts/config && echo "✓ Bluetooth powersave exclude enabled" || (echo "✗ Bluetooth powersave exclude not enabled" && exit 1)
+          grep -q "CONFIG_WIFI_POWERSAVE_EXCLUDE=y" artifacts/config && echo "✓ WiFi powersave exclude enabled" || (echo "✗ WiFi powersave exclude not enabled" && exit 1)
+          grep -q "CONFIG_DEBUG_REBOOT" artifacts/config && echo "✓ Debug reboot enabled" || (echo "✗ Debug reboot not enabled" && exit 1)
+          echo "All config checks passed!"
+
+      - name: Verify kernel image
+        run: |
+          file artifacts/Image | grep -q "ARM64" && echo "✓ Kernel image is ARM64" || (echo "✗ Kernel image is not ARM64" && exit 1)
+          echo "Kernel image verification passed!"
+
+  compatibility:
+    name: Compatibility Check
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: kernel-release
+          path: artifacts
+
+      - name: Check Google Stock ROM compatibility
+        run: |
+          # Verify GKI compatibility
+          grep -q "CONFIG_GKI" artifacts/config && echo "✓ GKI config present" || echo "⚠ GKI config not found (may be OK for non-GKI builds)"
+          
+          # Check for common Google Pixel configs
+          grep -q "CONFIG_SOC_ZUMA=y" artifacts/config && echo "✓ Tensor G3 (zuma) config enabled" || (echo "✗ Tensor G3 config not enabled" && exit 1)
+          grep -q "CONFIG_SOC_GOOGLE=y" artifacts/config && echo "✓ Google SoC config enabled" || (echo "✗ Google SoC config not enabled" && exit 1)
+          
+          echo "Google Stock ROM compatibility checks passed!"
+
+      - name: Check AOSP/LineageOS compatibility
+        run: |
+          # Check for standard Android configs
+          grep -q "CONFIG_ANDROID=y" artifacts/config && echo "✓ Android config enabled" || (echo "✗ Android config not enabled" && exit 1)
+          grep -q "CONFIG_ANDROID_BINDER_IPC=y" artifacts/config && echo "✓ Binder IPC enabled" || (echo "✗ Binder IPC not enabled" && exit 1)
+          grep -q "CONFIG_ASHMEM=y" artifacts/config && echo "✓ Ashmem enabled" || (echo "✗ Ashmem not enabled" && exit 1)
+          grep -q "CONFIG_ION=y" artifacts/config && echo "✓ ION enabled" || (echo "✗ ION not enabled" && exit 1)
+          
+          # Check SELinux
+          grep -q "CONFIG_SECURITY_SELINUX=y" artifacts/config && echo "✓ SELinux enabled" || (echo "✗ SELinux not enabled" && exit 1)
+          
+          echo "AOSP/LineageOS compatibility checks passed!"
