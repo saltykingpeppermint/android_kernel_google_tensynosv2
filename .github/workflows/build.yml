@@ -134,7 +134,7 @@ jobs:
         run: |
           cd ${{ env.KERNEL_SRC_DIR }}
           export ARCH=arm64
-          export CROSS_COMPILE=aarch64-linux-gnu-
+          export CROSS_COMPLIER=aarch64-linux-gnu-
           export LLVM=1
           export LLVM_IAS=1
           make O=${{ env.BUILD_DIR }} -j$(nproc) dtbs
@@ -161,32 +161,8 @@ jobs:
           cp ${{ env.BUILD_DIR }}/arch/arm64/boot/dts/google/*.dtb anykernel3/dtb/ 2>/dev/null || true
           mkdir -p anykernel3/modules
           cp -r ${{ env.BUILD_DIR }}/modules/lib/modules/* anykernel3/modules/ 2>/dev/null || true
-          cat > anykernel3/anykernel.sh << 'AK_EOF'
-properties() {
-  kernel.string=Tensor G3 KernelSU Next
-  do.devicecheck=1
-  do.modules=1
-  do.cleanup=1
-  do.cleanuponabort=1
-  device.name1=zuma
-  device.name2=shusky
-  device.name3=husky
-  device.name4=akita
-  device.name5=tokay
-  supported.versions=14
-}
-. tools/ak3-core.sh
-dump_boot
-write_boot
-if [ "$do.modules" == 1 ]; then
-  for module in modules/*; do
-    if [ -f "$module" ]; then
-      ui_print "Installing $(basename $module)..."
-      cp -f "$module" "$ramdisk/lib/modules/"
-    fi
-  done
-fi
-AK_EOF
+          # Write anykernel.sh using printf to avoid heredoc issues
+          printf 'properties() {\n  kernel.string=Tensor G3 KernelSU Next\n  do.devicecheck=1\n  do.modules=1\n  do.cleanup=1\n  do.cleanuponabort=1\n  device.name1=zuma\n  device.name2=shusky\n  device.name3=husky\n  device.name4=akita\n  device.name5=tokay\n  supported.versions=14\n}\n. tools/ak3-core.sh\ndump_boot\nwrite_boot\nif [ "$do.modules" == 1 ]; then\n  for module in modules/*; do\n    if [ -f "$module" ]; then\n      ui_print "Installing $(basename $module)..."\n      cp -f "$module" "$ramdisk/lib/modules/"\n    fi\n  done\nfi\n' > anykernel3/anykernel.sh
           cd anykernel3
           zip -r9 ${{ env.DIST_DIR }}/KernelSU-Next-zuma-${{ matrix.build_type }}-${{ github.run_number }}.zip . -x ".git*" -x "README.md" -x "*.zip"
 
