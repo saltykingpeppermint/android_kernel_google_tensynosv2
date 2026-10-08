@@ -2,10 +2,10 @@ name: Build Tensor G3 Kernel with KernelSU Next
 
 on:
   push:
-    branches: [main, 16.0.0-sultan]
+    branches: [main, master, 16.0.0-sultan]
     tags: ['v*']
   pull_request:
-    branches: [main, 16.0.0-sultan]
+    branches: [main, master, 16.0.0-sultan]
   workflow_dispatch:
     inputs:
       build_type:
