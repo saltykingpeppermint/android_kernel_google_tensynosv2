@@ -50,7 +50,7 @@ Custom kernel for Google Pixel 8 series (Tensor G3/zuma) with KernelSU Next root
 
 ```bash
 # Clone repository
-git clone https://github.com/YOUR_USERNAME/android_kernel_google_tensynos.git
+git clone https://github.com/saltykingpeppermint/android_kernel_google_tensynosv2.git
 cd android_kernel_google_tensynos
 
 # Make build script executable
@@ -226,6 +226,6 @@ make O=out menuconfig
 
 ## Support
 
-- Issues: [GitHub Issues](https://github.com/YOUR_USERNAME/android_kernel_google_tensynos/issues)
+- Issues: [GitHub Issues](https://github.com/saltykingpeppermint/android_kernel_google_tensynosv2/issues)
 - KernelSU Next: [Discord](https://discord.gg/kernelsu) | [Telegram](https://t.me/KernelSU_Next)
 - Pixel Kernel Development: [XDA Forum](https://forum.xda-developers.com/c/google-pixel-8-pro-development.14102/)
