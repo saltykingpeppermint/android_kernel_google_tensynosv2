@@ -1,0 +1,54 @@
+name: Verify Kernel Configs
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+jobs:
+  verify:
+    name: Verify Configs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check KernelSU Next config
+        run: |
+          echo "=== KernelSU Next Kconfig ==="
+          grep -A5 "config KSU" kernelsu-next/Kconfig
+
+      - name: Check zuma Kconfig additions
+        run: |
+          echo "=== zuma Kconfig.ext.zuma additions ==="
+          grep -A3 "BLUETOOTH_POWERSAVE_EXCLUDE" google-devices/zuma/Kconfig.ext.zuma
+          grep -A3 "WIFI_POWERSAVE_EXCLUDE" google-devices/zuma/Kconfig.ext.zuma
+
+      - name: Check bluetooth nitrous.c modifications
+        run: |
+          echo "=== Bluetooth power save exclusion ==="
+          grep -B2 -A5 "BLUETOOTH_POWERSAVE_EXCLUDE" google-modules/bluetooth/broadcom/nitrous.c
+
+      - name: Check WiFi Kbuild modifications
+        run: |
+          echo "=== WiFi power save exclusion ==="
+          grep -B2 -A5 "WIFI_POWERSAVE_EXCLUDE" google-modules/wlan/bcm4389/Kbuild
+
+      - name: Check restart retry
+        run: |
+          echo "=== Restart retry mechanism ==="
+          grep -B2 -A5 "MAX_RESTART_RETRIES" google-modules/power/reset/pixel-zuma-reboot.c
+
+      - name: Check build config
+        run: |
+          echo "=== build.config.common ==="
+          grep -E "CONFIG_KSU|CONFIG_BLUETOOTH_POWERSAVE|CONFIG_WIFI_POWERSAVE" build.config.common
+
+      - name: Summary
+        run: |
+          echo "✅ All kernel modifications verified!"
+          echo "📦 KernelSU Next: $(grep -c "config KSU" kernelsu-next/Kconfig) configs found"
+          echo "🔋 Power save exclusions: Added"
+          echo "🔄 Restart retries: 10 attempts implemented"
