@@ -267,17 +267,17 @@ EOF
       - name: Verify kernel config
         run: |
           # Check that required configs are enabled
-          grep -q "CONFIG_KSU=y" artifacts/config && echo "✓ KernelSU enabled" || (echo "✗ KernelSU not enabled" && exit 1)
-          grep -q "CONFIG_KPROBES=y" artifacts/config && echo "✓ Kprobes enabled" || (echo "✗ Kprobes not enabled" && exit 1)
-          grep -q "CONFIG_EXT4_FS=y" artifacts/config && echo "✓ EXT4 enabled" || (echo "✗ EXT4 not enabled" && exit 1)
-          grep -q "CONFIG_BLUETOOTH_POWERSAVE_EXCLUDE=y" artifacts/config && echo "✓ Bluetooth powersave exclude enabled" || (echo "✗ Bluetooth powersave exclude not enabled" && exit 1)
-          grep -q "CONFIG_WIFI_POWERSAVE_EXCLUDE=y" artifacts/config && echo "✓ WiFi powersave exclude enabled" || (echo "✗ WiFi powersave exclude not enabled" && exit 1)
-          grep -q "CONFIG_DEBUG_REBOOT" artifacts/config && echo "✓ Debug reboot enabled" || (echo "✗ Debug reboot not enabled" && exit 1)
+          grep -q "CONFIG_KSU=y" artifacts/config && echo "[OK] KernelSU enabled" || (echo "[FAIL] KernelSU not enabled" && exit 1)
+          grep -q "CONFIG_KPROBES=y" artifacts/config && echo "[OK] Kprobes enabled" || (echo "[FAIL] Kprobes not enabled" && exit 1)
+          grep -q "CONFIG_EXT4_FS=y" artifacts/config && echo "[OK] EXT4 enabled" || (echo "[FAIL] EXT4 not enabled" && exit 1)
+          grep -q "CONFIG_BLUETOOTH_POWERSAVE_EXCLUDE=y" artifacts/config && echo "[OK] Bluetooth powersave exclude enabled" || (echo "[FAIL] Bluetooth powersave exclude not enabled" && exit 1)
+          grep -q "CONFIG_WIFI_POWERSAVE_EXCLUDE=y" artifacts/config && echo "[OK] WiFi powersave exclude enabled" || (echo "[FAIL] WiFi powersave exclude not enabled" && exit 1)
+          grep -q "CONFIG_DEBUG_REBOOT" artifacts/config && echo "[OK] Debug reboot enabled" || (echo "[FAIL] Debug reboot not enabled" && exit 1)
           echo "All config checks passed!"
 
       - name: Verify kernel image
         run: |
-          file artifacts/Image | grep -q "ARM64" && echo "✓ Kernel image is ARM64" || (echo "✗ Kernel image is not ARM64" && exit 1)
+          file artifacts/Image | grep -q "ARM64" && echo "[OK] Kernel image is ARM64" || (echo "[FAIL] Kernel image is not ARM64" && exit 1)
           echo "Kernel image verification passed!"
 
   compatibility:
@@ -294,23 +294,23 @@ EOF
       - name: Check Google Stock ROM compatibility
         run: |
           # Verify GKI compatibility
-          grep -q "CONFIG_GKI" artifacts/config && echo "✓ GKI config present" || echo "⚠ GKI config not found (may be OK for non-GKI builds)"
+          grep -q "CONFIG_GKI" artifacts/config && echo "[OK] GKI config present" || echo "[WARN] GKI config not found (may be OK for non-GKI builds)"
           
           # Check for common Google Pixel configs
-          grep -q "CONFIG_SOC_ZUMA=y" artifacts/config && echo "✓ Tensor G3 (zuma) config enabled" || (echo "✗ Tensor G3 config not enabled" && exit 1)
-          grep -q "CONFIG_SOC_GOOGLE=y" artifacts/config && echo "✓ Google SoC config enabled" || (echo "✗ Google SoC config not enabled" && exit 1)
+          grep -q "CONFIG_SOC_ZUMA=y" artifacts/config && echo "[OK] Tensor G3 (zuma) config enabled" || (echo "[FAIL] Tensor G3 config not enabled" && exit 1)
+          grep -q "CONFIG_SOC_GOOGLE=y" artifacts/config && echo "[OK] Google SoC config enabled" || (echo "[FAIL] Google SoC config not enabled" && exit 1)
           
           echo "Google Stock ROM compatibility checks passed!"
 
       - name: Check AOSP/LineageOS compatibility
         run: |
           # Check for standard Android configs
-          grep -q "CONFIG_ANDROID=y" artifacts/config && echo "✓ Android config enabled" || (echo "✗ Android config not enabled" && exit 1)
-          grep -q "CONFIG_ANDROID_BINDER_IPC=y" artifacts/config && echo "✓ Binder IPC enabled" || (echo "✗ Binder IPC not enabled" && exit 1)
-          grep -q "CONFIG_ASHMEM=y" artifacts/config && echo "✓ Ashmem enabled" || (echo "✗ Ashmem not enabled" && exit 1)
-          grep -q "CONFIG_ION=y" artifacts/config && echo "✓ ION enabled" || (echo "✗ ION not enabled" && exit 1)
+          grep -q "CONFIG_ANDROID=y" artifacts/config && echo "[OK] Android config enabled" || (echo "[FAIL] Android config not enabled" && exit 1)
+          grep -q "CONFIG_ANDROID_BINDER_IPC=y" artifacts/config && echo "[OK] Binder IPC enabled" || (echo "[FAIL] Binder IPC not enabled" && exit 1)
+          grep -q "CONFIG_ASHMEM=y" artifacts/config && echo "[OK] Ashmem enabled" || (echo "[FAIL] Ashmem not enabled" && exit 1)
+          grep -q "CONFIG_ION=y" artifacts/config && echo "[OK] ION enabled" || (echo "[FAIL] ION not enabled" && exit 1)
           
           # Check SELinux
-          grep -q "CONFIG_SECURITY_SELINUX=y" artifacts/config && echo "✓ SELinux enabled" || (echo "✗ SELinux not enabled" && exit 1)
+          grep -q "CONFIG_SECURITY_SELINUX=y" artifacts/config && echo "[OK] SELinux enabled" || (echo "[FAIL] SELinux not enabled" && exit 1)
           
           echo "AOSP/LineageOS compatibility checks passed!"
