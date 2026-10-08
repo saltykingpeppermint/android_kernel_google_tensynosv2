@@ -70,43 +70,20 @@ jobs:
           
           # Add power save configs to zuma Kconfig
           if ! grep -q "BLUETOOTH_POWERSAVE_EXCLUDE" google-devices/zuma/Kconfig.ext.zuma; then
-            cat >> google-devices/zuma/Kconfig.ext.zuma << 'KCONFIG_EOF'
-
-# KernelSU Next
-source "$(srctree)/kernelsu-next/Kconfig"
-
-config BLUETOOTH_POWERSAVE_EXCLUDE
-  bool "Exclude Bluetooth from power saving"
-  default y
-  help
-    Exclude Bluetooth from power saving to work around hardware issues.
-
-config WIFI_POWERSAVE_EXCLUDE
-  bool "Exclude WiFi from power saving"
-  default y
-  help
-    Exclude WiFi from power saving to work around hardware issues.
-KCONFIG_EOF
+            printf '\n# KernelSU Next\nsource "$(srctree)/kernelsu-next/Kconfig"\n\nconfig BLUETOOTH_POWERSAVE_EXCLUDE\n  bool "Exclude Bluetooth from power saving"\n  default y\n  help\n    Exclude Bluetooth from power saving to work around hardware issues.\n\nconfig WIFI_POWERSAVE_EXCLUDE\n  bool "Exclude WiFi from power saving"\n  default y\n  help\n    Exclude WiFi from power saving to work around hardware issues.\n' >> google-devices/zuma/Kconfig.ext.zuma
           fi
           
           # Copy modified files
-          cp ${{ env.OUR_REPO_DIR }}/google-modules/bluetooth/broadcom/nitrous.c \
+          cp "${{ env.OUR_REPO_DIR }}/google-modules/bluetooth/broadcom/nitrous.c" \
              google-modules/bluetooth/broadcom/nitrous.c
-          cp ${{ env.OUR_REPO_DIR }}/google-modules/wlan/bcm4389/Kbuild \
+          cp "${{ env.OUR_REPO_DIR }}/google-modules/wlan/bcm4389/Kbuild" \
              google-modules/wlan/bcm4389/Kbuild
-          cp ${{ env.OUR_REPO_DIR }}/google-modules/power/reset/pixel-zuma-reboot.c \
+          cp "${{ env.OUR_REPO_DIR }}/google-modules/power/reset/pixel-zuma-reboot.c" \
              google-modules/power/reset/pixel-zuma-reboot.c
           
           # Add build configs
           if ! grep -q "CONFIG_KSU=y" build.config.common; then
-            cat >> build.config.common << 'BUILDCONFIG_EOF'
-
-CONFIG_KSU=y
-CONFIG_KPROBES=y
-CONFIG_EXT4_FS=y
-CONFIG_BLUETOOTH_POWERSAVE_EXCLUDE=y
-CONFIG_WIFI_POWERSAVE_EXCLUDE=y
-BUILDCONFIG_EOF
+            printf '\nCONFIG_KSU=y\nCONFIG_KPROBES=y\nCONFIG_EXT4_FS=y\nCONFIG_BLUETOOTH_POWERSAVE_EXCLUDE=y\nCONFIG_WIFI_POWERSAVE_EXCLUDE=y\n' >> build.config.common
           fi
 
       - name: Setup build environment
