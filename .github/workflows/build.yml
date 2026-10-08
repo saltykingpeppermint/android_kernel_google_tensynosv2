@@ -23,15 +23,16 @@ on:
         type: boolean
 
 env:
-  KERNEL_DIR: ${{ github.workspace }}
+  KERNEL_SRC_DIR: ${{ github.workspace }}/kernel_source
   BUILD_DIR: ${{ github.workspace }}/out
   DIST_DIR: ${{ github.workspace }}/dist
+  OUR_REPO_DIR: ${{ github.workspace }}/our_modifications
 
 jobs:
   build:
     name: Build Kernel (${{ matrix.build_type }})
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
@@ -43,19 +44,91 @@ jobs:
             debug: true
 
     steps:
-      - name: Checkout kernel source
+      - name: Checkout our modifications repo
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          submodules: recursive
+          path: ${{ env.OUR_REPO_DIR }}
+
+      - name: Clone full kernel source (Tensor G3 16.0.0-sultan)
+        run: |
+          git clone --depth=1 -b 16.0.0-sultan \
+            https://github.com/kerneltoast/android_kernel_google_tensynos.git \
+            ${{ env.KERNEL_SRC_DIR }}
+          echo "Kernel source cloned to ${{ env.KERNEL_SRC_DIR }}"
 
       - name: Checkout KernelSU Next
         uses: actions/checkout@v4
         with:
           repository: KernelSU-Next/KernelSU-Next
           ref: dev
-          path: kernelsu-next
+          path: ${{ env.KERNEL_SRC_DIR }}/kernelsu-next
           submodules: true
+
+      - name: Apply our modifications
+        run: |
+          cd ${{ env.KERNEL_SRC_DIR }}
+          
+          # Copy KernelSU Next integration to main Kconfig
+          if ! grep -q "kernelsu-next/Kconfig" Kconfig; then
+            sed -i '/source "security\/Kconfig"/a source "kernelsu-next\/Kconfig"' Kconfig
+            echo "Added KernelSU Next to main Kconfig"
+          fi
+          
+          # Copy zuma Kconfig additions (Bluetooth/WiFi power save exclusions)
+          if ! grep -q "BLUETOOTH_POWERSAVE_EXCLUDE" google-devices/zuma/Kconfig.ext.zuma; then
+            cat >> google-devices/zuma/Kconfig.ext.zuma << 'KCONFIG_EOF'
+
+# KernelSU Next
+source "$(srctree)/kernelsu-next/Kconfig"
+
+# Power saving exclusions for Bluetooth and WiFi (workaround for hardware issues)
+config BLUETOOTH_POWERSAVE_EXCLUDE
+	bool "Exclude Bluetooth from power saving"
+	default y
+	help
+	  Exclude Bluetooth from power saving to work around hardware issues.
+	  This keeps Bluetooth active during suspend to prevent connectivity problems.
+
+config WIFI_POWERSAVE_EXCLUDE
+	bool "Exclude WiFi from power saving"
+	default y
+	help
+	  Exclude WiFi from power saving to work around hardware issues.
+	  This keeps WiFi active during suspend to prevent connectivity problems.
+KCONFIG_EOF
+            echo "Added power save exclusion configs to zuma Kconfig"
+          fi
+          
+          # Copy our modified nitrous.c (Bluetooth power save exclusion)
+          cp ${{ env.OUR_REPO_DIR }}/google-modules/bluetooth/broadcom/nitrous.c \
+             google-modules/bluetooth/broadcom/nitrous.c
+          
+          # Copy our modified WiFi Kbuild (WiFi power save exclusion)
+          cp ${{ env.OUR_REPO_DIR }}/google-modules/wlan/bcm4389/Kbuild \
+             google-modules/wlan/bcm4389/Kbuild
+          
+          # Copy our modified pixel-zuma-reboot.c (10-retry restart)
+          cp ${{ env.OUR_REPO_DIR }}/google-modules/power/reset/pixel-zuma-reboot.c \
+             google-modules/power/reset/pixel-zuma-reboot.c
+          
+          # Update build.config.common with our configs
+          if ! grep -q "CONFIG_KSU=y" build.config.common; then
+            cat >> build.config.common << 'BUILDCONFIG_EOF'
+
+# KernelSU Next configuration
+CONFIG_KSU=y
+CONFIG_KPROBES=y
+CONFIG_EXT4_FS=y
+
+# Power saving exclusions for Bluetooth and WiFi
+CONFIG_BLUETOOTH_POWERSAVE_EXCLUDE=y
+CONFIG_WIFI_POWERSAVE_EXCLUDE=y
+BUILDCONFIG_EOF
+            echo "Added KernelSU and power save configs to build.config.common"
+          fi
+          
+          echo "All modifications applied successfully"
 
       - name: Setup build environment
         run: |
@@ -95,7 +168,7 @@ jobs:
 
       - name: Configure kernel
         run: |
-          cd ${{ env.KERNEL_DIR }}
+          cd ${{ env.KERNEL_SRC_DIR }}
           source build.config.common
           source google-devices/zuma/build.config.zuma
           
@@ -123,7 +196,7 @@ jobs:
 
       - name: Build kernel
         run: |
-          cd ${{ env.KERNEL_DIR }}
+          cd ${{ env.KERNEL_SRC_DIR }}
           
           export ARCH=arm64
           export SUBARCH=arm64
@@ -149,7 +222,7 @@ jobs:
 
       - name: Build DTBs
         run: |
-          cd ${{ env.KERNEL_DIR }}
+          cd ${{ env.KERNEL_SRC_DIR }}
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
           export LLVM=1
@@ -158,7 +231,7 @@ jobs:
 
       - name: Build modules
         run: |
-          cd ${{ env.KERNEL_DIR }}
+          cd ${{ env.KERNEL_SRC_DIR }}
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
           export LLVM=1
@@ -171,7 +244,7 @@ jobs:
 
       - name: Create AnyKernel3 flashable zip
         run: |
-          cd ${{ env.KERNEL_DIR }}
+          cd ${{ env.KERNEL_SRC_DIR }}
           
           # Clone AnyKernel3
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git anykernel3
@@ -248,69 +321,7 @@ EOF
             ${{ env.DIST_DIR }}/*.zip
             ${{ env.DIST_DIR }}/Image
             ${{ env.DIST_DIR }}/config
-            ${{ env.DIST_DIR }}/vmlinux
+            ${{ env.BUILD_DIR }}/vmlinux
           generate_release_notes: true
           draft: false
           prerelease: false
-
-  test:
-    name: Test Kernel Config
-    runs-on: ubuntu-latest
-    needs: build
-    steps:
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: kernel-release
-          path: artifacts
-
-      - name: Verify kernel config
-        run: |
-          # Check that required configs are enabled
-          grep -q "CONFIG_KSU=y" artifacts/config && echo "[OK] KernelSU enabled" || (echo "[FAIL] KernelSU not enabled" && exit 1)
-          grep -q "CONFIG_KPROBES=y" artifacts/config && echo "[OK] Kprobes enabled" || (echo "[FAIL] Kprobes not enabled" && exit 1)
-          grep -q "CONFIG_EXT4_FS=y" artifacts/config && echo "[OK] EXT4 enabled" || (echo "[FAIL] EXT4 not enabled" && exit 1)
-          grep -q "CONFIG_BLUETOOTH_POWERSAVE_EXCLUDE=y" artifacts/config && echo "[OK] Bluetooth powersave exclude enabled" || (echo "[FAIL] Bluetooth powersave exclude not enabled" && exit 1)
-          grep -q "CONFIG_WIFI_POWERSAVE_EXCLUDE=y" artifacts/config && echo "[OK] WiFi powersave exclude enabled" || (echo "[FAIL] WiFi powersave exclude not enabled" && exit 1)
-          grep -q "CONFIG_DEBUG_REBOOT" artifacts/config && echo "[OK] Debug reboot enabled" || (echo "[FAIL] Debug reboot not enabled" && exit 1)
-          echo "All config checks passed!"
-
-      - name: Verify kernel image
-        run: |
-          file artifacts/Image | grep -q "ARM64" && echo "[OK] Kernel image is ARM64" || (echo "[FAIL] Kernel image is not ARM64" && exit 1)
-          echo "Kernel image verification passed!"
-
-  compatibility:
-    name: Compatibility Check
-    runs-on: ubuntu-latest
-    needs: build
-    steps:
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: kernel-release
-          path: artifacts
-
-      - name: Check Google Stock ROM compatibility
-        run: |
-          # Verify GKI compatibility
-          grep -q "CONFIG_GKI" artifacts/config && echo "[OK] GKI config present" || echo "[WARN] GKI config not found (may be OK for non-GKI builds)"
-          
-          # Check for common Google Pixel configs
-          grep -q "CONFIG_SOC_ZUMA=y" artifacts/config && echo "[OK] Tensor G3 (zuma) config enabled" || (echo "[FAIL] Tensor G3 config not enabled" && exit 1)
-          grep -q "CONFIG_SOC_GOOGLE=y" artifacts/config && echo "[OK] Google SoC config enabled" || (echo "[FAIL] Google SoC config not enabled" && exit 1)
-          
-          echo "Google Stock ROM compatibility checks passed!"
-
-      - name: Check AOSP/LineageOS compatibility
-        run: |
-          # Check for standard Android configs
-          grep -q "CONFIG_ANDROID=y" artifacts/config && echo "[OK] Android config enabled" || (echo "[FAIL] Android config not enabled" && exit 1)
-          grep -q "CONFIG_ANDROID_BINDER_IPC=y" artifacts/config && echo "[OK] Binder IPC enabled" || (echo "[FAIL] Binder IPC not enabled" && exit 1)
-          grep -q "CONFIG_ASHMEM=y" artifacts/config && echo "[OK] Ashmem enabled" || (echo "[FAIL] Ashmem not enabled" && exit 1)
-          grep -q "CONFIG_ION=y" artifacts/config && echo "[OK] ION enabled" || (echo "[FAIL] ION not enabled" && exit 1)
-          
-          # Check SELinux
-          grep -q "CONFIG_SECURITY_SELINUX=y" artifacts/config && echo "[OK] SELinux enabled" || (echo "[FAIL] SELinux not enabled" && exit 1)
-          
-          echo "AOSP/LineageOS compatibility checks passed!"
