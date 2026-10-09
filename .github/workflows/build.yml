@@ -24,7 +24,6 @@ on:
 
 env:
   KERNEL_SRC_DIR: ${{ github.workspace }}/kernel_source
-  BUILD_DIR: ${{ github.workspace }}/out
   DIST_DIR: ${{ github.workspace }}/dist
   OUR_REPO_DIR: ${{ github.workspace }}/our_modifications
 
@@ -68,47 +67,24 @@ jobs:
         run: |
           cd ${{ env.KERNEL_SRC_DIR }}
           
-          # Debug: show Kconfig structure around line 25
-          echo "=== Kconfig lines 20-30 ==="
-          sed -n '20,30p' Kconfig
-          
-          # First, check if kernelsu-next/kernel/Kconfig exists
-          echo "=== Checking kernelsu-next/kernel/Kconfig ==="
-          ls -la kernelsu-next/kernel/Kconfig 2>&1
-          
-          # Debug: show full Kconfig to understand structure
-          echo "=== Full Kconfig (first 50 lines) ==="
-          head -50 Kconfig
-          
-          # Add KernelSU Next to Kconfig - try multiple patterns
+          # Add KernelSU Next to Kconfig
           # Note: KernelSU Next's Kconfig is in kernelsu-next/kernel/Kconfig
           if ! grep -q "kernelsu-next/kernel/Kconfig" Kconfig; then
-            # Try security/Kconfig
             if grep -q 'source "security/Kconfig"' Kconfig; then
               sed -i '/source "security\/Kconfig"/a source "kernelsu-next\/kernel\/Kconfig"' Kconfig
-              echo "Added after security/Kconfig"
-            # Try crypto/Kconfig
             elif grep -q 'source "crypto/Kconfig"' Kconfig; then
               sed -i '/source "crypto\/Kconfig"/i source "kernelsu-next\/kernel\/Kconfig"' Kconfig
-              echo "Added before crypto/Kconfig"
-            # Try lib/Kconfig
             elif grep -q 'source "lib/Kconfig"' Kconfig; then
               sed -i '/source "lib\/Kconfig"/i source "kernelsu-next\/kernel\/Kconfig"' Kconfig
-              echo "Added before lib/Kconfig"
-            # Last resort: append after Documentation/Kconfig
-            elif grep -q 'source "Documentation/Kconfig"' Kconfig; then
-              sed -i '/source "Documentation\/Kconfig"/a source "kernelsu-next\/kernel\/Kconfig"' Kconfig
-              echo "Added after Documentation/Kconfig"
             else
-              # Ultimate fallback: append before choice block
               sed -i '/choice/i source "kernelsu-next\/kernel\/Kconfig"' Kconfig
-              echo "Added before choice block"
             fi
           fi
           
-          # Verify it was added
-          echo "=== Kconfig after modification (lines 20-35) ==="
-          sed -n '20,35p' Kconfig
+          # Add power save configs to zuma Kconfig
+          if ! grep -q "BLUETOOTH_POWERSAVE_EXCLUDE" google-devices/zuma/Kconfig.ext.zuma; then
+            printf '\n# KernelSU Next\nsource "$(srctree)/kernelsu-next/kernel/Kconfig"\n\nconfig BLUETOOTH_POWERSAVE_EXCLUDE\n  bool "Exclude Bluetooth from power saving"\n  default y\n  help\n    Exclude Bluetooth from power saving to work around hardware issues.\n\nconfig WIFI_POWERSAVE_EXCLUDE\n  bool "Exclude WiFi from power saving"\n  default y\n  help\n    Exclude WiFi from power saving to work around hardware issues.\n' >> google-devices/zuma/Kconfig.ext.zuma
+          fi
           
           # Copy modified files
           cp "${{ env.OUR_REPO_DIR }}/google-modules/bluetooth/broadcom/nitrous.c" \
@@ -144,10 +120,10 @@ jobs:
         run: |
           cp ${{ env.OUR_REPO_DIR }}/build.config.constants ${{ env.KERNEL_SRC_DIR }}/build.config.constants
 
-      - name: Configure kernel
+      - name: Configure kernel (in-tree)
         run: |
           cd ${{ env.KERNEL_SRC_DIR }}
-          export ROOT_DIR=${{ env.OUR_REPO_DIR }}
+          export ROOT_DIR=${{ env.KERNEL_SRC_DIR }}
           export KERNEL_DIR=.
           source build.config.common
           source google-devices/zuma/build.config.zuma
@@ -158,15 +134,16 @@ jobs:
           export LLVM=1
           export LLVM_IAS=1
           export KCONFIG_NOTIMESTAMP=1
-          make O=${{ env.BUILD_DIR }} zuma_defconfig
-          ./scripts/config --file ${{ env.BUILD_DIR }}/.config \
+          
+          make zuma_defconfig
+          ./scripts/config --file .config \
             --enable KSU --enable KPROBES --enable EXT4_FS \
             --enable BLUETOOTH_POWERSAVE_EXCLUDE --enable WIFI_POWERSAVE_EXCLUDE \
             --enable DEBUG_REBOOT --set-str LOCALVERSION "-kernelsu-next"
-          make O=${{ env.BUILD_DIR }} olddefconfig
-          make O=${{ env.BUILD_DIR }} syncconfig
+          make olddefconfig
+          make syncconfig
 
-      - name: Build kernel
+      - name: Build kernel (in-tree)
         run: |
           cd ${{ env.KERNEL_SRC_DIR }}
           export ARCH=arm64
@@ -174,9 +151,9 @@ jobs:
           export LLVM=1
           export LLVM_IAS=1
           export KCONFIG_NOTIMESTAMP=1
-          make O=${{ env.BUILD_DIR }} -j$(nproc) LLVM=1 LLVM_IAS=1 CLANG_TRIPLE=aarch64-linux-gnu- Image
+          make -j$(nproc) LLVM=1 LLVM_IAS=1 CLANG_TRIPLE=aarch64-linux-gnu- Image
 
-      - name: Build DTBs
+      - name: Build DTBs (in-tree)
         run: |
           cd ${{ env.KERNEL_SRC_DIR }}
           export ARCH=arm64
@@ -184,9 +161,9 @@ jobs:
           export LLVM=1
           export LLVM_IAS=1
           export KCONFIG_NOTIMESTAMP=1
-          make O=${{ env.BUILD_DIR }} -j$(nproc) dtbs
+          make -j$(nproc) dtbs
 
-      - name: Build modules
+      - name: Build modules (in-tree)
         run: |
           cd ${{ env.KERNEL_SRC_DIR }}
           export ARCH=arm64
@@ -194,9 +171,33 @@ jobs:
           export LLVM=1
           export LLVM_IAS=1
           export KCONFIG_NOTIMESTAMP=1
-          make O=${{ env.BUILD_DIR }} -j$(nproc) modules
-          make O=${{ env.BUILD_DIR }} INSTALL_MOD_PATH=${{ env.BUILD_DIR }}/modules modules_install
-          find ${{ env.BUILD_DIR }}/modules -name "*.ko" -exec aarch64-linux-gnu-strip --strip-unneeded {} \; 2>/dev/null || true
+          make -j$(nproc) modules
+          make INSTALL_MOD_PATH=${{ env.DIST_DIR }}/modules modules_install
+          find ${{ env.DIST_DIR }}/modules -name "*.ko" -exec aarch64-linux-gnu-strip --strip-unneeded {} \; 2>/dev/null || true
+
+      - name: Prepare artifacts
+        run: |
+          mkdir -p ${{ env.DIST_DIR }}
+          cd ${{ env.KERNEL_SRC_DIR }}
+          
+          # Copy kernel image
+          cp arch/arm64/boot/Image ${{ env.DIST_DIR }}/Image-${{ matrix.build_type }}
+          
+          # Copy config
+          cp .config ${{ env.DIST_DIR }}/config-${{ matrix.build_type }}
+          
+          # Copy vmlinux
+          cp vmlinux ${{ env.DIST_DIR }}/vmlinux-${{ matrix.build_type }} 2>/dev/null || true
+          
+          # Copy DTBs
+          mkdir -p ${{ env.DIST_DIR }}/dtb
+          cp arch/arm64/boot/dts/google/*.dtb ${{ env.DIST_DIR }}/dtb/ 2>/dev/null || true
+          
+          # Copy modules
+          if [ -d "${{ env.DIST_DIR }}/modules" ]; then
+            mkdir -p ${{ env.DIST_DIR }}/modules-${{ matrix.build_type }}
+            cp -r ${{ env.DIST_DIR }}/modules/* ${{ env.DIST_DIR }}/modules-${{ matrix.build_type }}/ 2>/dev/null || true
+          fi
 
       - name: Create AnyKernel3 flashable zip
         run: |
@@ -204,12 +205,13 @@ jobs:
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git anykernel3
           rm -f anykernel3/Image anykernel3/dtb
           rm -rf anykernel3/modules
-          cp ${{ env.BUILD_DIR }}/arch/arm64/boot/Image anykernel3/
+          cp arch/arm64/boot/Image anykernel3/
           mkdir -p anykernel3/dtb
-          cp ${{ env.BUILD_DIR }}/arch/arm64/boot/dts/google/*.dtb anykernel3/dtb/ 2>/dev/null || true
+          cp arch/arm64/boot/dts/google/*.dtb anykernel3/dtb/ 2>/dev/null || true
           mkdir -p anykernel3/modules
-          cp -r ${{ env.BUILD_DIR }}/modules/lib/modules/* anykernel3/modules/ 2>/dev/null || true
-          # Write anykernel.sh using printf to avoid heredoc issues
+          if [ -d "${{ env.DIST_DIR }}/modules" ]; then
+            cp -r ${{ env.DIST_DIR }}/modules/lib/modules/* anykernel3/modules/ 2>/dev/null || true
+          fi
           printf 'properties() {\n  kernel.string=Tensor G3 KernelSU Next\n  do.devicecheck=1\n  do.modules=1\n  do.cleanup=1\n  do.cleanuponabort=1\n  device.name1=zuma\n  device.name2=shusky\n  device.name3=husky\n  device.name4=akita\n  device.name5=tokay\n  supported.versions=14\n}\n. tools/ak3-core.sh\ndump_boot\nwrite_boot\nif [ "$do.modules" == 1 ]; then\n  for module in modules/*; do\n    if [ -f "$module" ]; then\n      ui_print "Installing $(basename $module)..."\n      cp -f "$module" "$ramdisk/lib/modules/"\n    fi\n  done\nfi\n' > anykernel3/anykernel.sh
           cd anykernel3
           zip -r9 ${{ env.DIST_DIR }}/KernelSU-Next-zuma-${{ matrix.build_type }}-${{ github.run_number }}.zip . -x ".git*" -x "README.md" -x "*.zip"
@@ -220,9 +222,6 @@ jobs:
           name: kernel-${{ matrix.build_type }}
           path: |
             ${{ env.DIST_DIR }}/*
-            ${{ env.BUILD_DIR }}/arch/arm64/boot/Image
-            ${{ env.BUILD_DIR }}/.config
-            ${{ env.BUILD_DIR }}/vmlinux
           retention-days: 30
 
       - name: Create release (on tag push)
@@ -231,9 +230,9 @@ jobs:
         with:
           files: |
             ${{ env.DIST_DIR }}/*.zip
-            ${{ env.DIST_DIR }}/Image
-            ${{ env.DIST_DIR }}/config
-            ${{ env.BUILD_DIR }}/vmlinux
+            ${{ env.DIST_DIR }}/Image-*
+            ${{ env.DIST_DIR }}/config-*
+            ${{ env.DIST_DIR }}/vmlinux-*
           generate_release_notes: true
           draft: false
           prerelease: false
