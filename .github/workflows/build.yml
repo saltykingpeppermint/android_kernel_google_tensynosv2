@@ -83,26 +83,27 @@ jobs:
           head -50 Kconfig
           
           # Add KernelSU Next to Kconfig - try multiple patterns
-          if ! grep -q "kernelsu-next/Kconfig" Kconfig; then
+          # Note: KernelSU Next's Kconfig is in kernelsu-next/kernel/Kconfig
+          if ! grep -q "kernelsu-next/kernel/Kconfig" Kconfig; then
             # Try security/Kconfig
             if grep -q 'source "security/Kconfig"' Kconfig; then
-              sed -i '/source "security\/Kconfig"/a source "kernelsu-next\/Kconfig"' Kconfig
+              sed -i '/source "security\/Kconfig"/a source "kernelsu-next\/kernel\/Kconfig"' Kconfig
               echo "Added after security/Kconfig"
             # Try crypto/Kconfig
             elif grep -q 'source "crypto/Kconfig"' Kconfig; then
-              sed -i '/source "crypto\/Kconfig"/i source "kernelsu-next\/Kconfig"' Kconfig
+              sed -i '/source "crypto\/Kconfig"/i source "kernelsu-next\/kernel\/Kconfig"' Kconfig
               echo "Added before crypto/Kconfig"
             # Try lib/Kconfig
             elif grep -q 'source "lib/Kconfig"' Kconfig; then
-              sed -i '/source "lib\/Kconfig"/i source "kernelsu-next\/Kconfig"' Kconfig
+              sed -i '/source "lib\/Kconfig"/i source "kernelsu-next\/kernel\/Kconfig"' Kconfig
               echo "Added before lib/Kconfig"
             # Last resort: append after Documentation/Kconfig
             elif grep -q 'source "Documentation/Kconfig"' Kconfig; then
-              sed -i '/source "Documentation\/Kconfig"/a source "kernelsu-next\/Kconfig"' Kconfig
+              sed -i '/source "Documentation\/Kconfig"/a source "kernelsu-next\/kernel\/Kconfig"' Kconfig
               echo "Added after Documentation/Kconfig"
             else
               # Ultimate fallback: append before choice block
-              sed -i '/choice/i source "kernelsu-next\/Kconfig"' Kconfig
+              sed -i '/choice/i source "kernelsu-next\/kernel\/Kconfig"' Kconfig
               echo "Added before choice block"
             fi
           fi
@@ -110,10 +111,6 @@ jobs:
           # Verify it was added
           echo "=== Kconfig after modification (lines 20-35) ==="
           sed -n '20,35p' Kconfig
-          
-          # Also verify kernelsu-next/Kconfig exists
-          echo "=== Checking kernelsu-next/Kconfig exists ==="
-          ls -la kernelsu-next/Kconfig 2>&1
           
           # Copy modified files
           cp "${{ env.OUR_REPO_DIR }}/google-modules/bluetooth/broadcom/nitrous.c" \
