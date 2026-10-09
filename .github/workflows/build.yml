@@ -68,15 +68,38 @@ jobs:
         run: |
           cd ${{ env.KERNEL_SRC_DIR }}
           
-          # Add KernelSU Next to Kconfig (after security/Kconfig)
+          # Debug: show Kconfig structure around line 25
+          echo "=== Kconfig lines 20-30 ==="
+          sed -n '20,30p' Kconfig
+          
+          # Add KernelSU Next to Kconfig - try multiple patterns
           if ! grep -q "kernelsu-next/Kconfig" Kconfig; then
+            # Try security/Kconfig
             if grep -q 'source "security/Kconfig"' Kconfig; then
               sed -i '/source "security\/Kconfig"/a source "kernelsu-next\/Kconfig"' Kconfig
-            else
-              # Fallback: add before crypto/Kconfig
+              echo "Added after security/Kconfig"
+            # Try crypto/Kconfig
+            elif grep -q 'source "crypto/Kconfig"' Kconfig; then
               sed -i '/source "crypto\/Kconfig"/i source "kernelsu-next\/Kconfig"' Kconfig
+              echo "Added before crypto/Kconfig"
+            # Try lib/Kconfig
+            elif grep -q 'source "lib/Kconfig"' Kconfig; then
+              sed -i '/source "lib\/Kconfig"/i source "kernelsu-next\/Kconfig"' Kconfig
+              echo "Added before lib/Kconfig"
+            # Last resort: append after Documentation/Kconfig
+            elif grep -q 'source "Documentation/Kconfig"' Kconfig; then
+              sed -i '/source "Documentation\/Kconfig"/a source "kernelsu-next\/Kconfig"' Kconfig
+              echo "Added after Documentation/Kconfig"
+            else
+              # Ultimate fallback: append at end before choice block
+              sed -i '/choice/i source "kernelsu-next\/Kconfig"' Kconfig
+              echo "Added before choice block"
             fi
           fi
+          
+          # Verify it was added
+          echo "=== Kconfig after modification (lines 20-35) ==="
+          sed -n '20,35p' Kconfig
           
           # Add power save configs to zuma Kconfig
           if ! grep -q "BLUETOOTH_POWERSAVE_EXCLUDE" google-devices/zuma/Kconfig.ext.zuma; then
