@@ -115,6 +115,8 @@ jobs:
       - name: Configure kernel
         run: |
           cd ${{ env.KERNEL_SRC_DIR }}
+          export ROOT_DIR=${{ env.OUR_REPO_DIR }}
+          export KERNEL_DIR=.
           source build.config.common
           source google-devices/zuma/build.config.zuma
           export ARCH=arm64
