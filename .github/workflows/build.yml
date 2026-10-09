@@ -72,11 +72,9 @@ jobs:
           echo "=== Kconfig lines 20-30 ==="
           sed -n '20,30p' Kconfig
           
-          # First, check if kernelsu-next/Kconfig exists
-          echo "=== Checking kernelsu-next directory ==="
-          ls -la kernelsu-next/ 2>&1 | head -20
-          echo "=== Checking kernelsu-next/Kconfig ==="
-          ls -la kernelsu-next/Kconfig 2>&1
+          # First, check if kernelsu-next/kernel/Kconfig exists
+          echo "=== Checking kernelsu-next/kernel/Kconfig ==="
+          ls -la kernelsu-next/kernel/Kconfig 2>&1
           
           # Debug: show full Kconfig to understand structure
           echo "=== Full Kconfig (first 50 lines) ==="
