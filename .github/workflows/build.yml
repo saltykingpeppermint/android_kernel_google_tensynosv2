@@ -157,6 +157,7 @@ jobs:
           export CLANG_TRIPLE=aarch64-linux-gnu-
           export LLVM=1
           export LLVM_IAS=1
+          export KCONFIG_NOTIMESTAMP=1
           make O=${{ env.BUILD_DIR }} zuma_defconfig
           ./scripts/config --file ${{ env.BUILD_DIR }}/.config \
             --enable KSU --enable KPROBES --enable EXT4_FS \
@@ -172,15 +173,17 @@ jobs:
           export CROSS_COMPILE=aarch64-linux-gnu-
           export LLVM=1
           export LLVM_IAS=1
+          export KCONFIG_NOTIMESTAMP=1
           make O=${{ env.BUILD_DIR }} -j$(nproc) LLVM=1 LLVM_IAS=1 CLANG_TRIPLE=aarch64-linux-gnu- Image
 
       - name: Build DTBs
         run: |
           cd ${{ env.KERNEL_SRC_DIR }}
           export ARCH=arm64
-          export CROSS_COMPLIER=aarch64-linux-gnu-
+          export CROSS_COMPILE=aarch64-linux-gnu-
           export LLVM=1
           export LLVM_IAS=1
+          export KCONFIG_NOTIMESTAMP=1
           make O=${{ env.BUILD_DIR }} -j$(nproc) dtbs
 
       - name: Build modules
@@ -190,6 +193,7 @@ jobs:
           export CROSS_COMPILE=aarch64-linux-gnu-
           export LLVM=1
           export LLVM_IAS=1
+          export KCONFIG_NOTIMESTAMP=1
           make O=${{ env.BUILD_DIR }} -j$(nproc) modules
           make O=${{ env.BUILD_DIR }} INSTALL_MOD_PATH=${{ env.BUILD_DIR }}/modules modules_install
           find ${{ env.BUILD_DIR }}/modules -name "*.ko" -exec aarch64-linux-gnu-strip --strip-unneeded {} \; 2>/dev/null || true
