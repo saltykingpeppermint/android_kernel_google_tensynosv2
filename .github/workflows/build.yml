@@ -72,6 +72,16 @@ jobs:
           echo "=== Kconfig lines 20-30 ==="
           sed -n '20,30p' Kconfig
           
+          # First, check if kernelsu-next/Kconfig exists
+          echo "=== Checking kernelsu-next directory ==="
+          ls -la kernelsu-next/ 2>&1 | head -20
+          echo "=== Checking kernelsu-next/Kconfig ==="
+          ls -la kernelsu-next/Kconfig 2>&1
+          
+          # Debug: show full Kconfig to understand structure
+          echo "=== Full Kconfig (first 50 lines) ==="
+          head -50 Kconfig
+          
           # Add KernelSU Next to Kconfig - try multiple patterns
           if ! grep -q "kernelsu-next/Kconfig" Kconfig; then
             # Try security/Kconfig
@@ -91,7 +101,7 @@ jobs:
               sed -i '/source "Documentation\/Kconfig"/a source "kernelsu-next\/Kconfig"' Kconfig
               echo "Added after Documentation/Kconfig"
             else
-              # Ultimate fallback: append at end before choice block
+              # Ultimate fallback: append before choice block
               sed -i '/choice/i source "kernelsu-next\/Kconfig"' Kconfig
               echo "Added before choice block"
             fi
@@ -101,10 +111,9 @@ jobs:
           echo "=== Kconfig after modification (lines 20-35) ==="
           sed -n '20,35p' Kconfig
           
-          # Add power save configs to zuma Kconfig
-          if ! grep -q "BLUETOOTH_POWERSAVE_EXCLUDE" google-devices/zuma/Kconfig.ext.zuma; then
-            printf '\n# KernelSU Next\nsource "$(srctree)/kernelsu-next/Kconfig"\n\nconfig BLUETOOTH_POWERSAVE_EXCLUDE\n  bool "Exclude Bluetooth from power saving"\n  default y\n  help\n    Exclude Bluetooth from power saving to work around hardware issues.\n\nconfig WIFI_POWERSAVE_EXCLUDE\n  bool "Exclude WiFi from power saving"\n  default y\n  help\n    Exclude WiFi from power saving to work around hardware issues.\n' >> google-devices/zuma/Kconfig.ext.zuma
-          fi
+          # Also verify kernelsu-next/Kconfig exists
+          echo "=== Checking kernelsu-next/Kconfig exists ==="
+          ls -la kernelsu-next/Kconfig 2>&1
           
           # Copy modified files
           cp "${{ env.OUR_REPO_DIR }}/google-modules/bluetooth/broadcom/nitrous.c" \
