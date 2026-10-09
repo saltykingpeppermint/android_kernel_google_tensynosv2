@@ -68,9 +68,14 @@ jobs:
         run: |
           cd ${{ env.KERNEL_SRC_DIR }}
           
-          # Add KernelSU Next to Kconfig
+          # Add KernelSU Next to Kconfig (after security/Kconfig)
           if ! grep -q "kernelsu-next/Kconfig" Kconfig; then
-            sed -i '/source "security\/Kconfig"/a source "kernelsu-next\/Kconfig"' Kconfig
+            if grep -q 'source "security/Kconfig"' Kconfig; then
+              sed -i '/source "security\/Kconfig"/a source "kernelsu-next\/Kconfig"' Kconfig
+            else
+              # Fallback: add before crypto/Kconfig
+              sed -i '/source "crypto\/Kconfig"/i source "kernelsu-next\/Kconfig"' Kconfig
+            fi
           fi
           
           # Add power save configs to zuma Kconfig
