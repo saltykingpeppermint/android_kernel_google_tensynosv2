@@ -163,6 +163,7 @@ jobs:
             --enable BLUETOOTH_POWERSAVE_EXCLUDE --enable WIFI_POWERSAVE_EXCLUDE \
             --enable DEBUG_REBOOT --set-str LOCALVERSION "-kernelsu-next"
           make O=${{ env.BUILD_DIR }} olddefconfig
+          make O=${{ env.BUILD_DIR }} syncconfig
 
       - name: Build kernel
         run: |
