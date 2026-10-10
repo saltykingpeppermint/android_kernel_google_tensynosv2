@@ -181,10 +181,16 @@ jobs:
           export LLVM=1
           export LLVM_IAS=1
           export KCONFIG_NOTIMESTAMP=1
+          export KBUILD_OUTPUT=""
+          export O=""
           unset KBUILD_OUTPUT
           unset O
           
+          # Force clean
+          rm -rf out 2>/dev/null || true
           make mrproper 2>/dev/null || true
+          
+          # Configure directly without any output directory
           make zuma_defconfig
           ./scripts/config --file .config \
             --enable KSU --enable KPROBES --enable EXT4_FS \
@@ -192,6 +198,9 @@ jobs:
             --enable DEBUG_REBOOT --set-str LOCALVERSION "-kernelsu-next"
           make olddefconfig
           make syncconfig
+          
+          # Verify .config exists in current directory
+          ls -la .config
 
       - name: Build kernel (in-tree)
         run: |
@@ -201,8 +210,11 @@ jobs:
           export LLVM=1
           export LLVM_IAS=1
           export KCONFIG_NOTIMESTAMP=1
+          export KBUILD_OUTPUT=""
+          export O=""
           unset KBUILD_OUTPUT
           unset O
+          rm -rf out 2>/dev/null || true
           make -j$(nproc) LLVM=1 LLVM_IAS=1 CLANG_TRIPLE=aarch64-linux-gnu- Image
 
       - name: Build DTBs
@@ -212,8 +224,11 @@ jobs:
           export CROSS_COMPILE=aarch64-linux-gnu-
           export LLVM=1
           export LLVM_IAS=1
+          export KBUILD_OUTPUT=""
+          export O=""
           unset KBUILD_OUTPUT
           unset O
+          rm -rf out 2>/dev/null || true
           make -j$(nproc) dtbs
 
       - name: Build modules
@@ -223,8 +238,11 @@ jobs:
           export CROSS_COMPILE=aarch64-linux-gnu-
           export LLVM=1
           export LLVM_IAS=1
+          export KBUILD_OUTPUT=""
+          export O=""
           unset KBUILD_OUTPUT
           unset O
+          rm -rf out 2>/dev/null || true
           make -j$(nproc) modules
           make INSTALL_MOD_PATH=${{ env.DIST_DIR }}/modules modules_install
           find ${{ env.DIST_DIR }}/modules -name "*.ko" -exec aarch64-linux-gnu-strip --strip-unneeded {} \; 2>/dev/null || true
