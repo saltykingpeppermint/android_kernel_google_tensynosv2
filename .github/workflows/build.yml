@@ -25,6 +25,7 @@ on:
 env:
   KERNEL_SRC_DIR: ${{ github.workspace }}/kernel_source
   BUILD_DIR: ${{ github.workspace }}/kernel_build
+  OUT_DIR: ${{ github.workspace }}/kernel_out
   DIST_DIR: ${{ github.workspace }}/dist
   OUR_REPO_DIR: ${{ github.workspace }}/our_modifications
 
@@ -95,7 +96,7 @@ jobs:
             printf '\nCONFIG_KSU=y\nCONFIG_KPROBES=y\nCONFIG_EXT4_FS=y\nCONFIG_BLUETOOTH_POWERSAVE_EXCLUDE=y\nCONFIG_WIFI_POWERSAVE_EXCLUDE=y\n' >> build.config.common
           fi
 
-      - name: Create clean build directory
+      - name: Prepare build directory (clean copy)
         run: |
           cp -r ${{ env.KERNEL_SRC_DIR }} ${{ env.BUILD_DIR }}
           cd ${{ env.BUILD_DIR }}
@@ -152,7 +153,7 @@ jobs:
         run: |
           sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
 
-      - name: Configure kernel
+      - name: Configure kernel (proper out-of-tree)
         run: |
           cd ${{ env.BUILD_DIR }}
           
@@ -168,16 +169,20 @@ jobs:
           export LLVM_IAS=1
           export KCONFIG_NOTIMESTAMP=1
           
-          make mrproper 2>/dev/null || true
-          make zuma_defconfig \
+          # Use PROPER out-of-tree build with KBUILD_OUTPUT OUTSIDE kernel source
+          export KBUILD_OUTPUT=${{ env.OUT_DIR }}
+          mkdir -p ${{ env.OUT_DIR }}
+          
+          # Configure with explicit output directory
+          make O=${{ env.OUT_DIR }} mrproper 2>/dev/null || true
+          make O=${{ env.OUT_DIR }} zuma_defconfig \
             KSU=y KPROBES=y EXT4_FS=y \
             BLUETOOTH_POWERSAVE_EXCLUDE=y WIFI_POWERSAVE_EXCLUDE=y \
             DEBUG_REBOOT=y LOCALVERSION="-kernelsu-next" \
             syncconfig
           
-          # Copy .config from out/ to current dir (kernel creates out/ automatically)
-          cp out/.config .config 2>/dev/null || true
-          ls -la .config out/.config 2>/dev/null || true
+          # Verify config
+          ls -la ${{ env.OUT_DIR }}/.config
 
       - name: Build kernel + dtbs + modules
         run: |
@@ -188,9 +193,9 @@ jobs:
           export LLVM=1
           export LLVM_IAS=1
           export KCONFIG_NOTIMESTAMP=1
-          rm -rf out 2>/dev/null || true
+          export KBUILD_OUTPUT=${{ env.OUT_DIR }}
           
-          make -j$(nproc) \
+          make O=${{ env.OUT_DIR }} -j$(nproc) \
             LLVM=1 LLVM_IAS=1 CLANG_TRIPLE=aarch64-linux-gnu- \
             Image dtbs modules
 
@@ -202,21 +207,21 @@ jobs:
           export CROSS_COMPILE=aarch64-linux-gnu-
           export LLVM=1
           export LLVM_IAS=1
-          rm -rf out 2>/dev/null || true
-          make INSTALL_MOD_PATH=${{ env.DIST_DIR }}/modules modules_install
+          export KBUILD_OUTPUT=${{ env.OUT_DIR }}
+          
+          make O=${{ env.OUT_DIR }} INSTALL_MOD_PATH=${{ env.DIST_DIR }}/modules modules_install
           find ${{ env.DIST_DIR }}/modules -name "*.ko" -exec aarch64-linux-gnu-strip --strip-unneeded {} \; 2>/dev/null || true
 
       - name: Prepare artifacts
         run: |
           mkdir -p ${{ env.DIST_DIR }}
-          cd ${{ env.BUILD_DIR }}
           
-          # Copy artifacts from out/ (where kernel actually builds them)
-          cp out/arch/arm64/boot/Image ${{ env.DIST_DIR }}/Image-${{ matrix.build_type }}
-          cp out/.config ${{ env.DIST_DIR }}/config-${{ matrix.build_type }}
-          cp out/vmlinux ${{ env.DIST_DIR }}/vmlinux-${{ matrix.build_type }} 2>/dev/null || true
+          # Copy artifacts from OUT_DIR (where kernel actually builds them)
+          cp ${{ env.OUT_DIR }}/arch/arm64/boot/Image ${{ env.DIST_DIR }}/Image-${{ matrix.build_type }}
+          cp ${{ env.OUT_DIR }}/.config ${{ env.DIST_DIR }}/config-${{ matrix.build_type }}
+          cp ${{ env.OUT_DIR }}/vmlinux ${{ env.DIST_DIR }}/vmlinux-${{ matrix.build_type }} 2>/dev/null || true
           mkdir -p ${{ env.DIST_DIR }}/dtb
-          cp out/arch/arm64/boot/dts/google/*.dtb ${{ env.DIST_DIR }}/dtb/ 2>/dev/null || true
+          cp ${{ env.OUT_DIR }}/arch/arm64/boot/dts/google/*.dtb ${{ env.DIST_DIR }}/dtb/ 2>/dev/null || true
           
           # Copy modules
           if [ -d "${{ env.DIST_DIR }}/modules" ]; then
@@ -230,9 +235,9 @@ jobs:
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git anykernel3
           rm -f anykernel3/Image anykernel3/dtb
           rm -rf anykernel3/modules
-          cp out/arch/arm64/boot/Image anykernel3/
+          cp ${{ env.OUT_DIR }}/arch/arm64/boot/Image anykernel3/
           mkdir -p anykernel3/dtb
-          cp out/arch/arm64/boot/dts/google/*.dtb anykernel3/dtb/ 2>/dev/null || true
+          cp ${{ env.OUT_DIR }}/arch/arm64/boot/dts/google/*.dtb anykernel3/dtb/ 2>/dev/null || true
           mkdir -p anykernel3/modules
           if [ -d "${{ env.DIST_DIR }}/modules" ]; then
             cp -r ${{ env.DIST_DIR }}/modules/lib/modules/* anykernel3/modules/ 2>/dev/null || true
