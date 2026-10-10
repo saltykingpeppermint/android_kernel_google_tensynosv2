@@ -101,21 +101,15 @@ jobs:
 
       - name: Create clean build directory
         run: |
-          # Create completely fresh build directory
           cp -r ${{ env.KERNEL_SRC_DIR }} ${{ env.BUILD_DIR }}
           cd ${{ env.BUILD_DIR }}
-          
-          # Clean any artifacts from previous runs
           make mrproper 2>/dev/null || true
-          
-          # Checkout KernelSU Next into build directory
           cp -r ${{ env.KERNEL_SRC_DIR }}/kernelsu-next kernelsu-next
 
       - name: Apply modifications to build directory
         run: |
           cd ${{ env.BUILD_DIR }}
           
-          # Add KernelSU Next to Kconfig
           if ! grep -q "kernelsu-next/kernel/Kconfig" Kconfig; then
             if grep -q 'source "security/Kconfig"' Kconfig; then
               sed -i '/source "security\/Kconfig"/a source "kernelsu-next\/kernel\/Kconfig"' Kconfig
@@ -128,12 +122,10 @@ jobs:
             fi
           fi
           
-          # Add power save configs to zuma Kconfig
           if ! grep -q "BLUETOOTH_POWERSAVE_EXCLUDE" google-devices/zuma/Kconfig.ext.zuma; then
             printf '\n# KernelSU Next\nsource "$(srctree)/kernelsu-next/kernel/Kconfig"\n\nconfig BLUETOOTH_POWERSAVE_EXCLUDE\n  bool "Exclude Bluetooth from power saving"\n  default y\n  help\n    Exclude Bluetooth from power saving to work around hardware issues.\n\nconfig WIFI_POWERSAVE_EXCLUDE\n  bool "Exclude WiFi from power saving"\n  default y\n  help\n    Exclude WiFi from power saving to work around hardware issues.\n' >> google-devices/zuma/Kconfig.ext.zuma
           fi
           
-          # Copy modified files
           cp ${{ env.KERNEL_SRC_DIR }}/google-modules/bluetooth/broadcom/nitrous.c \
              google-modules/bluetooth/broadcom/nitrous.c
           cp ${{ env.KERNEL_SRC_DIR }}/google-modules/wlan/bcm4389/Kbuild \
@@ -141,12 +133,10 @@ jobs:
           cp ${{ env.KERNEL_SRC_DIR }}/google-modules/power/reset/pixel-zuma-reboot.c \
              google-modules/power/reset/pixel-zuma-reboot.c
           
-          # Add build configs
           if ! grep -q "CONFIG_KSU=y" build.config.common; then
             printf '\nCONFIG_KSU=y\nCONFIG_KPROBES=y\nCONFIG_EXT4_FS=y\nCONFIG_BLUETOOTH_POWERSAVE_EXCLUDE=y\nCONFIG_WIFI_POWERSAVE_EXCLUDE=y\n' >> build.config.common
           fi
           
-          # Copy build config constants
           cp ${{ env.OUR_REPO_DIR }}/build.config.constants build.config.constants
 
       - name: Setup build environment
@@ -166,7 +156,7 @@ jobs:
         run: |
           sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
 
-      - name: Configure kernel (clean in-tree)
+      - name: Configure kernel (single make call)
         run: |
           cd ${{ env.BUILD_DIR }}
           
@@ -186,23 +176,37 @@ jobs:
           unset KBUILD_OUTPUT
           unset O
           
-          # Force clean
-          rm -rf out 2>/dev/null || true
+          # Complete configuration in one go - avoid multiple make calls
           make mrproper 2>/dev/null || true
+          make zuma_defconfig \
+            KSU=y KPROBES=y EXT4_FS=y \
+            BLUETOOTH_POWERSAVE_EXCLUDE=y WIFI_POWERSAVE_EXCLUDE=y \
+            DEBUG_REBOOT=y LOCALVERSION="-kernelsu-next" \
+            syncconfig
           
-          # Configure directly without any output directory
-          make zuma_defconfig
-          ./scripts/config --file .config \
-            --enable KSU --enable KPROBES --enable EXT4_FS \
-            --enable BLUETOOTH_POWERSAVE_EXCLUDE --enable WIFI_POWERSAVE_EXCLUDE \
-            --enable DEBUG_REBOOT --set-str LOCALVERSION "-kernelsu-next"
-          make olddefconfig
-          make syncconfig
-          
-          # Verify .config exists in current directory
           ls -la .config
 
-      - name: Build kernel (in-tree)
+      - name: Build everything (single make call)
+        run: |
+          cd ${{ env.BUILD_DIR }}
+          
+          export ARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export LLVM=1
+          export LLVM_IAS=1
+          export KCONFIG_NOTIMESTAMP=1
+          export KBUILD_OUTPUT=""
+          export O=""
+          unset KBUILD_OUTPUT
+          unset O
+          rm -rf out 2>/dev/null || true
+          
+          # Build everything in ONE make call to avoid config regeneration
+          make -j$(nproc) \
+            LLVM=1 LLVM_IAS=1 CLANG_TRIPLE=aarch64-linux-gnu- \
+            Image dtbs modules
+
+      - name: Install modules
         run: |
           cd ${{ env.BUILD_DIR }}
           export ARCH=arm64
@@ -215,35 +219,6 @@ jobs:
           unset KBUILD_OUTPUT
           unset O
           rm -rf out 2>/dev/null || true
-          make -j$(nproc) LLVM=1 LLVM_IAS=1 CLANG_TRIPLE=aarch64-linux-gnu- Image
-
-      - name: Build DTBs
-        run: |
-          cd ${{ env.BUILD_DIR }}
-          export ARCH=arm64
-          export CROSS_COMPILE=aarch64-linux-gnu-
-          export LLVM=1
-          export LLVM_IAS=1
-          export KBUILD_OUTPUT=""
-          export O=""
-          unset KBUILD_OUTPUT
-          unset O
-          rm -rf out 2>/dev/null || true
-          make -j$(nproc) dtbs
-
-      - name: Build modules
-        run: |
-          cd ${{ env.BUILD_DIR }}
-          export ARCH=arm64
-          export CROSS_COMPILE=aarch64-linux-gnu-
-          export LLVM=1
-          export LLVM_IAS=1
-          export KBUILD_OUTPUT=""
-          export O=""
-          unset KBUILD_OUTPUT
-          unset O
-          rm -rf out 2>/dev/null || true
-          make -j$(nproc) modules
           make INSTALL_MOD_PATH=${{ env.DIST_DIR }}/modules modules_install
           find ${{ env.DIST_DIR }}/modules -name "*.ko" -exec aarch64-linux-gnu-strip --strip-unneeded {} \; 2>/dev/null || true
 
@@ -252,20 +227,11 @@ jobs:
           mkdir -p ${{ env.DIST_DIR }}
           cd ${{ env.BUILD_DIR }}
           
-          # Copy kernel image
           cp arch/arm64/boot/Image ${{ env.DIST_DIR }}/Image-${{ matrix.build_type }}
-          
-          # Copy config
           cp .config ${{ env.DIST_DIR }}/config-${{ matrix.build_type }}
-          
-          # Copy vmlinux
           cp vmlinux ${{ env.DIST_DIR }}/vmlinux-${{ matrix.build_type }} 2>/dev/null || true
-          
-          # Copy DTBs
           mkdir -p ${{ env.DIST_DIR }}/dtb
           cp arch/arm64/boot/dts/google/*.dtb ${{ env.DIST_DIR }}/dtb/ 2>/dev/null || true
-          
-          # Copy modules
           if [ -d "${{ env.DIST_DIR }}/modules" ]; then
             mkdir -p ${{ env.DIST_DIR }}/modules-${{ matrix.build_type }}
             cp -r ${{ env.DIST_DIR }}/modules/* ${{ env.DIST_DIR }}/modules-${{ matrix.build_type }}/ 2>/dev/null || true
