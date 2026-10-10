@@ -96,16 +96,19 @@ jobs:
             printf '\nCONFIG_KSU=y\nCONFIG_KPROBES=y\nCONFIG_EXT4_FS=y\nCONFIG_BLUETOOTH_POWERSAVE_EXCLUDE=y\nCONFIG_WIFI_POWERSAVE_EXCLUDE=y\n' >> build.config.common
           fi
 
-      - name: Prepare build directory (clean copy)
+      - name: Create completely isolated build directory
         run: |
-          cp -r ${{ env.KERNEL_SRC_DIR }} ${{ env.BUILD_DIR }}
-          cd ${{ env.BUILD_DIR }}
+          # Create a completely fresh build directory OUTSIDE workspace
+          mkdir -p /tmp/kernel_build
+          cp -r ${{ env.KERNEL_SRC_DIR }}/* /tmp/kernel_build/
+          cp -r ${{ env.KERNEL_SRC_DIR }}/kernelsu-next /tmp/kernel_build/kernelsu-next
+          
+          cd /tmp/kernel_build
           make mrproper 2>/dev/null || true
-          cp -r ${{ env.KERNEL_SRC_DIR }}/kernelsu-next kernelsu-next
 
-      - name: Apply modifications to build directory
+      - name: Apply modifications to isolated build directory
         run: |
-          cd ${{ env.BUILD_DIR }}
+          cd /tmp/kernel_build
           
           if ! grep -q "kernelsu-next/kernel/Kconfig" Kconfig; then
             if grep -q 'source "security/Kconfig"' Kconfig; then
@@ -153,42 +156,45 @@ jobs:
         run: |
           sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
 
-      - name: Configure kernel (force out-of-tree)
+      - name: Build kernel completely in one go (no config loop)
         run: |
-          cd ${{ env.BUILD_DIR }}
+          cd /tmp/kernel_build
           
-          export ROOT_DIR=${{ env.BUILD_DIR }}
+          export ROOT_DIR=/tmp/kernel_build
           export KERNEL_DIR=.
-          source build.config.common
-          source google-devices/zuma/build.config.zuma
           export ARCH=arm64
           export SUBARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
+          export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
           export CLANG_TRIPLE=aarch64-linux-gnu-
           export LLVM=1
           export LLVM_IAS=1
           export KCONFIG_NOTIMESTAMP=1
+          export KBUILD_OUTPUT=/tmp/kernel_out
+          export O=/tmp/kernel_out
+          unset KBUILD_OUTPUT
+          unset O
           
-          # Force external output directory - completely outside kernel source
-          export KBUILD_OUTPUT=${{ env.OUT_DIR }}
-          export O=${{ env.OUT_DIR }}
-          mkdir -p ${{ env.OUT_DIR }}
+          # Create output directory OUTSIDE source
+          mkdir -p /tmp/kernel_out
           
-          # Clean and configure with explicit output directory
-          make O=${{ env.OUT_DIR }} mrproper 2>/dev/null || true
-          make O=${{ env.OUT_DIR }} KBUILD_OUTPUT=${{ env.OUT_DIR }} \
-            zuma_defconfig \
+          # Single make call: configure + build everything - NO INTERMEDIATE MAKE CALLS
+          # This avoids the config regeneration loop completely
+          make -j$(nproc) \
+            LLVM=1 LLVM_IAS=1 CLANG_TRIPLE=aarch64-linux-gnu- \
+            KBUILD_OUTPUT=/tmp/kernel_out O=/tmp/kernel_out \
             KSU=y KPROBES=y EXT4_FS=y \
             BLUETOOTH_POWERSAVE_EXCLUDE=y WIFI_POWERSAVE_EXCLUDE=y \
             DEBUG_REBOOT=y LOCALVERSION="-kernelsu-next" \
-            syncconfig
+            Image dtbs modules
           
-          # Verify config is in external output directory
-          ls -la ${{ env.OUT_DIR }}/.config
+          # Verify outputs
+          ls -la /tmp/kernel_out/arch/arm64/boot/Image
+          ls -la /tmp/kernel_out/.config
 
-      - name: Build kernel + dtbs + modules
+      - name: Install modules
         run: |
-          cd ${{ env.BUILD_DIR }}
+          cd /tmp/kernel_build
           
           export ARCH=arm64
           export SUBARCH=arm64
@@ -198,33 +204,12 @@ jobs:
           export LLVM=1
           export LLVM_IAS=1
           export KCONFIG_NOTIMESTAMP=1
-          export KBUILD_OUTPUT=${{ env.OUT_DIR }}
-          export O=${{ env.OUT_DIR }}
+          export KBUILD_OUTPUT=/tmp/kernel_out
+          export O=/tmp/kernel_out
           unset KBUILD_OUTPUT
           unset O
           
-          # Build everything with explicit output directory
-          make O=${{ env.OUT_DIR }} -j$(nproc) \
-            LLVM=1 LLVM_IAS=1 CLANG_TRIPLE=aarch64-linux-gnu- \
-            Image dtbs modules
-
-      - name: Install modules
-        run: |
-          cd ${{ env.BUILD_DIR }}
-          
-          export ARCH=arm64
-          export SUBARCH=arm64
-          export CROSS_COMPILE=aarch64-linux-gnu-
-          export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
-          export LLVM=1
-          export LLVM_IAS=1
-          export KCONFIG_NOTIMESTAMP=1
-          export KBUILD_OUTPUT=${{ env.OUT_DIR }}
-          export O=${{ env.OUT_DIR }}
-          unset KBUILD_OUTPUT
-          unset O
-          
-          make O=${{ env.OUT_DIR }} INSTALL_MOD_PATH=${{ env.DIST_DIR }}/modules modules_install
+          make O=/tmp/kernel_out INSTALL_MOD_PATH=${{ env.DIST_DIR }}/modules modules_install
           find ${{ env.DIST_DIR }}/modules -name "*.ko" -exec aarch64-linux-gnu-strip --strip-unneeded {} \; 2>/dev/null || true
 
       - name: Prepare artifacts
@@ -232,11 +217,11 @@ jobs:
           mkdir -p ${{ env.DIST_DIR }}
           
           # Copy artifacts from external output directory
-          cp ${{ env.OUT_DIR }}/arch/arm64/boot/Image ${{ env.DIST_DIR }}/Image-${{ matrix.build_type }}
-          cp ${{ env.OUT_DIR }}/.config ${{ env.DIST_DIR }}/config-${{ matrix.build_type }}
-          cp ${{ env.OUT_DIR }}/vmlinux ${{ env.DIST_DIR }}/vmlinux-${{ matrix.build_type }} 2>/dev/null || true
+          cp /tmp/kernel_out/arch/arm64/boot/Image ${{ env.DIST_DIR }}/Image-${{ matrix.build_type }}
+          cp /tmp/kernel_out/.config ${{ env.DIST_DIR }}/config-${{ matrix.build_type }}
+          cp /tmp/kernel_out/vmlinux ${{ env.DIST_DIR }}/vmlinux-${{ matrix.build_type }} 2>/dev/null || true
           mkdir -p ${{ env.DIST_DIR }}/dtb
-          cp ${{ env.OUT_DIR }}/arch/arm64/boot/dts/google/*.dtb ${{ env.DIST_DIR }}/dtb/ 2>/dev/null || true
+          cp /tmp/kernel_out/arch/arm64/boot/dts/google/*.dtb ${{ env.DIST_DIR }}/dtb/ 2>/dev/null || true
           
           # Copy modules
           if [ -d "${{ env.DIST_DIR }}/modules" ]; then
@@ -246,13 +231,13 @@ jobs:
 
       - name: Create AnyKernel3 flashable zip
         run: |
-          cd ${{ env.BUILD_DIR }}
+          cd /tmp/kernel_build
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git anykernel3
           rm -f anykernel3/Image anykernel3/dtb
           rm -rf anykernel3/modules
-          cp ${{ env.OUT_DIR }}/arch/arm64/boot/Image anykernel3/
+          cp /tmp/kernel_out/arch/arm64/boot/Image anykernel3/
           mkdir -p anykernel3/dtb
-          cp ${{ env.OUT_DIR }}/arch/arm64/boot/dts/google/*.dtb anykernel3/dtb/ 2>/dev/null || true
+          cp /tmp/kernel_out/arch/arm64/boot/dts/google/*.dtb anykernel3/dtb/ 2>/dev/null || true
           mkdir -p anykernel3/modules
           if [ -d "${{ env.DIST_DIR }}/modules" ]; then
             cp -r ${{ env.DIST_DIR }}/modules/lib/modules/* anykernel3/modules/ 2>/dev/null || true
