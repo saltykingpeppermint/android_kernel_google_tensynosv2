@@ -123,6 +123,10 @@ jobs:
       - name: Configure kernel (in-tree)
         run: |
           cd ${{ env.KERNEL_SRC_DIR }}
+          
+          # Clean any previous build artifacts
+          make mrproper 2>/dev/null || true
+          
           export ROOT_DIR=${{ env.KERNEL_SRC_DIR }}
           export KERNEL_DIR=.
           source build.config.common
