@@ -138,11 +138,22 @@ jobs:
             DEBUG_REBOOT=y LOCALVERSION="-kernelsu-next"
           make KBUILD_OUTPUT="${OUT_DIR}" O="${OUT_DIR}" KCONFIG_NOTIMESTAMP=1 syncconfig
           
-          echo "=== Building kernel (single make call) ==="
+          # Verify config exists
+          ls -la "${OUT_DIR}/.config"
+          
+          echo "=== Building kernel (single make call with proper env) ==="
+          
+          # Build everything with proper environment - run from source dir with explicit output dir
+          # Export all necessary env vars to prevent config regeneration
+          export KCONFIG_NOTIMESTAMP=1
+          export KBUILD_OUTPUT="/tmp/kernel_out"
+          export O="/tmp/kernel_out"
+          
+          # Run make from source directory with explicit output dir
+          cd "${BUILD_DIR}"
           make -j$(nproc) \
             LLVM=1 LLVM_IAS=1 CLANG_TRIPLE=aarch64-linux-gnu- \
             KBUILD_OUTPUT="${OUT_DIR}" O="${OUT_DIR}" \
-            KCONFIG_NOTIMESTAMP=1 \
             Image dtbs modules
           
           # Verify outputs
