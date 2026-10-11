@@ -172,11 +172,12 @@ jobs:
           # Configure with explicit out-of-tree build
           make KBUILD_OUTPUT=/tmp/kernel_out O=/tmp/kernel_out mrproper 2>/dev/null || true
           make KBUILD_OUTPUT=/tmp/kernel_out O=/tmp/kernel_out \
+            KCONFIG_NOTIMESTAMP=1 \
             zuma_defconfig \
             KSU=y KPROBES=y EXT4_FS=y \
             BLUETOOTH_POWERSAVE_EXCLUDE=y WIFI_POWERSAVE_EXCLUDE=y \
             DEBUG_REBOOT=y LOCALVERSION="-kernelsu-next"
-          make KBUILD_OUTPUT=/tmp/kernel_out O=/tmp/kernel_out syncconfig
+          make KBUILD_OUTPUT=/tmp/kernel_out O=/tmp/kernel_out KCONFIG_NOTIMESTAMP=1 syncconfig
           
           # Verify config exists
           ls -la /tmp/kernel_out/.config
@@ -194,10 +195,11 @@ jobs:
           export LLVM_IAS=1
           export KCONFIG_NOTIMESTAMP=1
           
-          # Build everything in ONE make call
+          # Build everything with explicit output directory - force no config regeneration
           make -j$(nproc) \
             LLVM=1 LLVM_IAS=1 CLANG_TRIPLE=aarch64-linux-gnu- \
             KBUILD_OUTPUT=/tmp/kernel_out O=/tmp/kernel_out \
+            KCONFIG_NOTIMESTAMP=1 \
             Image dtbs modules
           
           # Verify outputs
