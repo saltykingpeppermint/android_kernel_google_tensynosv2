@@ -94,48 +94,6 @@ jobs:
             printf '\nCONFIG_KSU=y\nCONFIG_KPROBES=y\nCONFIG_EXT4_FS=y\nCONFIG_BLUETOOTH_POWERSAVE_EXCLUDE=y\nCONFIG_WIFI_POWERSAVE_EXCLUDE=y\n' >> build.config.common
           fi
 
-      - name: Create isolated build directory in /tmp
-        run: |
-          # Create completely fresh build directory in /tmp
-          mkdir -p /tmp/kernel_build
-          cp -r ${{ env.KERNEL_SRC_DIR }}/* /tmp/kernel_build/
-          cp -r ${{ env.KERNEL_SRC_DIR }}/kernelsu-next /tmp/kernel_build/kernelsu-next
-          cd /tmp/kernel_build
-          make mrproper 2>/dev/null || true
-
-      - name: Apply modifications to isolated build
-        run: |
-          cd /tmp/kernel_build
-          
-          if ! grep -q "kernelsu-next/kernel/Kconfig" Kconfig; then
-            if grep -q 'source "security/Kconfig"' Kconfig; then
-              sed -i '/source "security\/Kconfig"/a source "kernelsu-next\/kernel\/Kconfig"' Kconfig
-            elif grep -q 'source "crypto/Kconfig"' Kconfig; then
-              sed -i '/source "crypto\/Kconfig"/i source "kernelsu-next\/kernel\/Kconfig"' Kconfig
-            elif grep -q 'source "lib/Kconfig"' Kconfig; then
-              sed -i '/source "lib\/Kconfig"/i source "kernelsu-next\/kernel\/Kconfig"' Kconfig
-            else
-              sed -i '/choice/i source "kernelsu-next\/kernel\/Kconfig"' Kconfig
-            fi
-          fi
-          
-          if ! grep -q "BLUETOOTH_POWERSAVE_EXCLUDE" google-devices/zuma/Kconfig.ext.zuma; then
-            printf '\n# KernelSU Next\nsource "$(srctree)/kernelsu-next/kernel/Kconfig"\n\nconfig BLUETOOTH_POWERSAVE_EXCLUDE\n  bool "Exclude Bluetooth from power saving"\n  default y\n  help\n    Exclude Bluetooth from power saving to work around hardware issues.\n\nconfig WIFI_POWERSAVE_EXCLUDE\n  bool "Exclude WiFi from power saving"\n  default y\n  help\n    Exclude WiFi from power saving to work around hardware issues.\n' >> google-devices/zuma/Kconfig.ext.zuma
-          fi
-          
-          cp ${{ env.KERNEL_SRC_DIR }}/google-modules/bluetooth/broadcom/nitrous.c \
-             google-modules/bluetooth/broadcom/nitrous.c
-          cp ${{ env.KERNEL_SRC_DIR }}/google-modules/wlan/bcm4389/Kbuild \
-             google-modules/wlan/bcm4389/Kbuild
-          cp ${{ env.KERNEL_SRC_DIR }}/google-modules/power/reset/pixel-zuma-reboot.c \
-             google-modules/power/reset/pixel-zuma-reboot.c
-          
-          if ! grep -q "CONFIG_KSU=y" build.config.common; then
-            printf '\nCONFIG_KSU=y\nCONFIG_KPROBES=y\nCONFIG_EXT4_FS=y\nCONFIG_BLUETOOTH_POWERSAVE_EXCLUDE=y\nCONFIG_WIFI_POWERSAVE_EXCLUDE=y\n' >> build.config.common
-          fi
-          
-          cp ${{ env.OUR_REPO_DIR }}/build.config.constants build.config.constants
-
       - name: Setup build environment
         run: |
           sudo apt-get update
@@ -153,86 +111,82 @@ jobs:
         run: |
           sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
 
-      - name: Configure kernel (proper out-of-tree)
+      - name: Build kernel using Google's build system
         run: |
-          cd /tmp/kernel_build
+          cd ${{ env.KERNEL_SRC_DIR }}
           
-          export ARCH=arm64
-          export SUBARCH=arm64
-          export CROSS_COMPILE=aarch64-linux-gnu-
-          export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
-          export CLANG_TRIPLE=aarch64-linux-gnu-
-          export LLVM=1
-          export LLVM_IAS=1
-          export KCONFIG_NOTIMESTAMP=1
+          # Apply our modifications directly to source
+          if ! grep -q "kernelsu-next/kernel/Kconfig" Kconfig; then
+            if grep -q 'source "security/Kconfig"' Kconfig; then
+              sed -i '/source "security\/Kconfig"/a source "kernelsu-next\/kernel\/Kconfig"' Kconfig
+            elif grep -q 'source "crypto/Kconfig"' Kconfig; then
+              sed -i '/source "crypto\/Kconfig"/i source "kernelsu-next\/kernel\/Kconfig"' Kconfig
+            elif grep -q 'source "lib/Kconfig"' Kconfig; then
+              sed -i '/source "lib\/Kconfig"/i source "kernelsu-next\/kernel\/Kconfig"' Kconfig
+            else
+              sed -i '/choice/i source "kernelsu-next\/kernel\/Kconfig"' Kconfig
+            fi
+          fi
           
-          # Create output directory OUTSIDE source tree
-          mkdir -p /tmp/kernel_out
+          if ! grep -q "BLUETOOTH_POWERSAVE_EXCLUDE" google-devices/zuma/Kconfig.ext.zuma; then
+            printf '\n# KernelSU Next\nsource "$(srctree)/kernelsu-next/kernel/Kconfig"\n\nconfig BLUETOOTH_POWERSAVE_EXCLUDE\n  bool "Exclude Bluetooth from power saving"\n  default y\n  help\n    Exclude Bluetooth from power saving to work around hardware issues.\n\nconfig WIFI_POWERSAVE_EXCLUDE\n  bool "Exclude WiFi from power saving"\n  default y\n  help\n    Exclude WiFi from power saving to work around hardware issues.\n' >> google-devices/zuma/Kconfig.ext.zuma
+          fi
           
-          # Configure with explicit out-of-tree build
-          make KBUILD_OUTPUT=/tmp/kernel_out O=/tmp/kernel_out mrproper 2>/dev/null || true
-          make KBUILD_OUTPUT=/tmp/kernel_out O=/tmp/kernel_out \
-            KCONFIG_NOTIMESTAMP=1 \
-            zuma_defconfig \
-            KSU=y KPROBES=y EXT4_FS=y \
-            BLUETOOTH_POWERSAVE_EXCLUDE=y WIFI_POWERSAVE_EXCLUDE=y \
-            DEBUG_REBOOT=y LOCALVERSION="-kernelsu-next"
-          make KBUILD_OUTPUT=/tmp/kernel_out O=/tmp/kernel_out KCONFIG_NOTIMESTAMP=1 syncconfig
+          cp ${{ env.OUR_REPO_DIR }}/google-modules/bluetooth/broadcom/nitrous.c \
+             google-modules/bluetooth/broadcom/nitrous.c
+          cp ${{ env.OUR_REPO_DIR }}/google-modules/wlan/bcm4389/Kbuild \
+             google-modules/wlan/bcm4389/Kbuild
+          cp ${{ env.OUR_REPO_DIR }}/google-modules/power/reset/pixel-zuma-reboot.c \
+             google-modules/power/reset/pixel-zuma-reboot.c
           
-          # Verify config exists
-          ls -la /tmp/kernel_out/.config
-
-      - name: Build kernel + dtbs + modules
-        run: |
-          cd /tmp/kernel_build
+          if ! grep -q "CONFIG_KSU=y" build.config.common; then
+            printf '\nCONFIG_KSU=y\nCONFIG_KPROBES=y\nCONFIG_EXT4_FS=y\nCONFIG_BLUETOOTH_POWERSAVE_EXCLUDE=y\nCONFIG_WIFI_POWERSAVE_EXCLUDE=y\n' >> build.config.common
+          fi
           
-          export ARCH=arm64
-          export SUBARCH=arm64
-          export CROSS_COMPILE=aarch64-linux-gnu-
-          export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
-          export CLANG_TRIPLE=aarch64-linux-gnu-
-          export LLVM=1
-          export LLVM_IAS=1
-          export KCONFIG_NOTIMESTAMP=1
+          # Copy KernelSU Next to source
+          cp -r kernelsu-next kernelsu-next
           
-          # Build everything with explicit output directory - force no config regeneration
-          make -j$(nproc) \
-            LLVM=1 LLVM_IAS=1 CLANG_TRIPLE=aarch64-linux-gnu- \
-            KBUILD_OUTPUT=/tmp/kernel_out O=/tmp/kernel_out \
-            KCONFIG_NOTIMESTAMP=1 \
-            Image dtbs modules
+          # Use Google's official build script for zuma
+          export BUILD_CONFIG=google-devices/zuma/build.config.zuma
+          export DIST_DIR=${{ env.DIST_DIR }}
           
-          # Verify outputs
-          ls -la /tmp/kernel_out/arch/arm64/boot/Image
-          ls -la /tmp/kernel_out/.config
+          # Add our custom configs to build config
+          echo 'CONFIG_KSU=y' >> build.config.common
+          echo 'CONFIG_KPROBES=y' >> build.config.common
+          echo 'CONFIG_EXT4_FS=y' >> build.config.common
+          echo 'CONFIG_BLUETOOTH_POWERSAVE_EXCLUDE=y' >> build.config.common
+          echo 'CONFIG_WIFI_POWERSAVE_EXCLUDE=y' >> build.config.common
+          echo 'CONFIG_DEBUG_REBOOT=y' >> build.config.common
+          echo 'CONFIG_LOCALVERSION="-kernelsu-next"' >> build.config.common
+          
+          # Build using Google's build script
+          bash google-devices/zuma/build_zuma.sh
+          
+          # Copy artifacts
+          mkdir -p ${{ env.DIST_DIR }}
+          cp out/arch/arm64/boot/Image ${{ env.DIST_DIR }}/Image-${{ matrix.build_type }}
+          cp out/.config ${{ env.DIST_DIR }}/config-${{ matrix.build_type }}
+          cp out/vmlinux ${{ env.DIST_DIR }}/vmlinux-${{ matrix.build_type }} 2>/dev/null || true
+          mkdir -p ${{ env.DIST_DIR }}/dtb
+          cp out/arch/arm64/boot/dts/google/*.dtb ${{ env.DIST_DIR }}/dtb/ 2>/dev/null || true
 
       - name: Install modules
         run: |
-          cd /tmp/kernel_build
+          cd ${{ env.KERNEL_SRC_DIR }}
           
-          export ARCH=arm64
-          export SUBARCH=arm64
-          export CROSS_COMPILE=aarch64-linux-gnu-
-          export CROSS_COMPILE_ARM32=arm-linux-gneabi-
-          export CLANG_TRIPLE=aarch64-linux-gnu-
-          export LLVM=1
-          export LLVM_IAS=1
-          export KCONFIG_NOTIMESTAMP=1
-          
-          make KBUILD_OUTPUT=/tmp/kernel_out O=/tmp/kernel_out \
-            INSTALL_MOD_PATH=${{ env.DIST_DIR }}/modules modules_install
+          make O=out modules_install INSTALL_MOD_PATH=${{ env.DIST_DIR }}/modules
           find ${{ env.DIST_DIR }}/modules -name "*.ko" -exec aarch64-linux-gnu-strip --strip-unneeded {} \; 2>/dev/null || true
 
       - name: Prepare artifacts
         run: |
           mkdir -p ${{ env.DIST_DIR }}
           
-          # Copy artifacts from external output directory
-          cp /tmp/kernel_out/arch/arm64/boot/Image ${{ env.DIST_DIR }}/Image-${{ matrix.build_type }}
-          cp /tmp/kernel_out/.config ${{ env.DIST_DIR }}/config-${{ matrix.build_type }}
-          cp /tmp/kernel_out/vmlinux ${{ env.DIST_DIR }}/vmlinux-${{ matrix.build_type }} 2>/dev/null || true
+          # Copy artifacts
+          cp out/arch/arm64/boot/Image ${{ env.DIST_DIR }}/Image-${{ matrix.build_type }}
+          cp out/.config ${{ env.DIST_DIR }}/config-${{ matrix.build_type }}
+          cp out/vmlinux ${{ env.DIST_DIR }}/vmlinux-${{ matrix.build_type }} 2>/dev/null || true
           mkdir -p ${{ env.DIST_DIR }}/dtb
-          cp /tmp/kernel_out/arch/arm64/boot/dts/google/*.dtb ${{ env.DIST_DIR }}/dtb/ 2>/dev/null || true
+          cp out/arch/arm64/boot/dts/google/*.dtb ${{ env.DIST_DIR }}/dtb/ 2>/dev/null || true
           
           # Copy modules
           if [ -d "${{ env.DIST_DIR }}/modules" ]; then
@@ -242,13 +196,13 @@ jobs:
 
       - name: Create AnyKernel3 flashable zip
         run: |
-          cd /tmp/kernel_build
+          cd ${{ env.KERNEL_SRC_DIR }}
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git anykernel3
           rm -f anykernel3/Image anykernel3/dtb
           rm -rf anykernel3/modules
-          cp /tmp/kernel_out/arch/arm64/boot/Image anykernel3/
+          cp out/arch/arm64/boot/Image anykernel3/
           mkdir -p anykernel3/dtb
-          cp /tmp/kernel_out/arch/arm64/boot/dts/google/*.dtb anykernel3/dtb/ 2>/dev/null || true
+          cp out/arch/arm64/boot/dts/google/*.dtb anykernel3/dtb/ 2>/dev/null || true
           mkdir -p anykernel3/modules
           if [ -d "${{ env.DIST_DIR }}/modules" ]; then
             cp -r ${{ env.DIST_DIR }}/modules/lib/modules/* anykernel3/modules/ 2>/dev/null || true
