@@ -115,28 +115,22 @@ jobs:
         run: |
           cd ${{ env.KERNEL_SRC_DIR }}
           
-          # Copy build config constants
-          cp ${{ env.OUR_REPO_DIR }}/build.config.constants build.config.constants
-          
           export ROOT_DIR=${{ env.KERNEL_SRC_DIR }}
           export KERNEL_DIR=.
           export ARCH=arm64
           export SUBARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
-          export CROSS_COMPILE_ARM32=arm-linux-gneabi-
+          export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
           export CLANG_TRIPLE=aarch64-linux-gnu-
           export LLVM=1
           export LLVM_IAS=1
           export KCONFIG_NOTIMESTAMP=1
           
-          # Apply our configs to build config
-          echo 'CONFIG_KSU=y' >> build.config.common
-          echo 'CONFIG_KPROBES=y' >> build.config.common
-          echo 'CONFIG_EXT4_FS=y' >> build.config.common
-          echo 'CONFIG_BLUETOOTH_POWERSAVE_EXCLUDE=y' >> build.config.common
-          echo 'CONFIG_WIFI_POWERSAVE_EXCLUDE=y' >> build.config.common
-          echo 'CONFIG_DEBUG_REBOOT=y' >> build.config.common
-          echo 'CONFIG_LOCALVERSION="-kernelsu-next"' >> build.config.common
+          # Force clean - remove any existing out directory
+          rm -rf out 2>/dev/null || true
+          
+          # Copy build config constants
+          cp ${{ env.OUR_REPO_DIR }}/build.config.constants build.config.constants
           
           # Source the build configs
           source build.config.common
@@ -155,7 +149,7 @@ jobs:
           make olddefconfig
           make syncconfig
           
-          # Build everything in ONE call
+          # Build everything in ONE call - no intermediate make calls
           make -j$(nproc) \
             LLVM=1 LLVM_IAS=1 CLANG_TRIPLE=aarch64-linux-gnu- \
             KCONFIG_NOTIMESTAMP=1 \
