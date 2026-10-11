@@ -65,7 +65,7 @@ jobs:
 
       - name: Prepare build script
         run: |
-          cat > /tmp/build_kernel.sh << 'EOF'
+          cat > /tmp/build_kernel.sh << 'SCRIPTEOF'
           #!/bin/bash
           set -euo pipefail
           
@@ -129,31 +129,42 @@ jobs:
           OUT_DIR="/tmp/kernel_out"
           mkdir -p "${OUT_DIR}"
           
-          echo "=== Configuring kernel (out-of-tree) ==="
+          echo "=== Generating complete .config (definitive config) ==="
+          
+          # Generate complete .config in ONE GO - no intermediate steps
           make KBUILD_OUTPUT="${OUT_DIR}" O="${OUT_DIR}" mrproper 2>/dev/null || true
           make KBUILD_OUTPUT="${OUT_DIR}" O="${OUT_DIR}" \
             zuma_defconfig \
             KSU=y KPROBES=y EXT4_FS=y \
             BLUETOOTH_POWERSAVE_EXCLUDE=y WIFI_POWERSAVE_EXCLUDE=y \
             DEBUG_REBOOT=y LOCALVERSION="-kernelsu-next"
+          
+          # Apply our custom configs via scripts/config
+          ./scripts/config --file "${OUT_DIR}/.config" \
+            --enable KSU --enable KPROBES --enable EXT4_FS \
+            --enable BLUETOOTH_POWERSAVE_EXCLUDE --enable WIFI_POWERSAVE_EXCLUDE \
+            --enable DEBUG_REBOOT --set-str LOCALVERSION "-kernelsu-next"
+          
+          # Finalize config - NO MORE CONFIG CHANGES AFTER THIS
+          make KBUILD_OUTPUT="${OUT_DIR}" O="${OUT_DIR}" KCONFIG_NOTIMESTAMP=1 olddefconfig
           make KBUILD_OUTPUT="${OUT_DIR}" O="${OUT_DIR}" KCONFIG_NOTIMESTAMP=1 syncconfig
           
           # Verify config exists
           ls -la "${OUT_DIR}/.config"
           
-          echo "=== Building kernel (single make call with proper env) ==="
+          echo "=== Building kernel (single make call, no config changes) ==="
           
-          # Build everything with proper environment - run from source dir with explicit output dir
-          # Export all necessary env vars to prevent config regeneration
+          # Build with explicit env vars and single make call
           export KCONFIG_NOTIMESTAMP=1
-          export KBUILD_OUTPUT="/tmp/kernel_out"
-          export O="/tmp/kernel_out"
+          export KBUILD_OUTPUT="${OUT_DIR}"
+          export O="${OUT_DIR}"
           
           # Run make from source directory with explicit output dir
           cd "${BUILD_DIR}"
           make -j$(nproc) \
             LLVM=1 LLVM_IAS=1 CLANG_TRIPLE=aarch64-linux-gnu- \
             KBUILD_OUTPUT="${OUT_DIR}" O="${OUT_DIR}" \
+            KCONFIG_NOTIMESTAMP=1 \
             Image dtbs modules
           
           # Verify outputs
@@ -195,7 +206,7 @@ jobs:
           zip -r9 "${DIST_DIR}/KernelSU-Next-zuma-${BUILD_TYPE}-${GITHUB_RUN_NUMBER}.zip" . -x ".git*" -x "README.md" -x "*.zip"
           
           echo "=== Build completed successfully! ==="
-          EOF
+          SCRIPTEOF
           chmod +x /tmp/build_kernel.sh
 
       - name: Setup build environment
