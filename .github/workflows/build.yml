@@ -143,8 +143,8 @@ jobs:
             printf '\nCONFIG_KSU=y\nCONFIG_KPROBES=y\nCONFIG_EXT4_FS=y\nCONFIG_BLUETOOTH_POWERSAVE_EXCLUDE=y\nCONFIG_WIFI_POWERSAVE_EXCLUDE=y\n' >> build.config.common
           fi
           
-          # Copy KernelSU Next to source
-          cp -r kernelsu-next kernelsu-next
+          # Copy KernelSU Next to source (already there from checkout)
+          # cp -r kernelsu-next kernelsu-next  # Already exists from checkout
           
           # Use Google's official build script for zuma
           export BUILD_CONFIG=google-devices/zuma/build.config.zuma
