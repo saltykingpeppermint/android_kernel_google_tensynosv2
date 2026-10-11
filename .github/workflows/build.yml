@@ -115,6 +115,9 @@ jobs:
         run: |
           cd ${{ env.KERNEL_SRC_DIR }}
           
+          # Copy build config constants
+          cp ${{ env.OUR_REPO_DIR }}/build.config.constants build.config.constants
+          
           export ARCH=arm64
           export SUBARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
