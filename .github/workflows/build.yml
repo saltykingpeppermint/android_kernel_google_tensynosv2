@@ -24,8 +24,6 @@ on:
 
 env:
   KERNEL_SRC_DIR: ${{ github.workspace }}/kernel_source
-  BUILD_DIR: ${{ github.workspace }}/kernel_build
-  OUT_DIR: ${{ github.workspace }}/kernel_out
   DIST_DIR: ${{ github.workspace }}/dist
   OUR_REPO_DIR: ${{ github.workspace }}/our_modifications
 
@@ -96,17 +94,16 @@ jobs:
             printf '\nCONFIG_KSU=y\nCONFIG_KPROBES=y\nCONFIG_EXT4_FS=y\nCONFIG_BLUETOOTH_POWERSAVE_EXCLUDE=y\nCONFIG_WIFI_POWERSAVE_EXCLUDE=y\n' >> build.config.common
           fi
 
-      - name: Create completely isolated build directory
+      - name: Create isolated build directory in /tmp
         run: |
-          # Create a completely fresh build directory OUTSIDE workspace
+          # Create completely fresh build directory in /tmp
           mkdir -p /tmp/kernel_build
           cp -r ${{ env.KERNEL_SRC_DIR }}/* /tmp/kernel_build/
           cp -r ${{ env.KERNEL_SRC_DIR }}/kernelsu-next /tmp/kernel_build/kernelsu-next
-          
           cd /tmp/kernel_build
           make mrproper 2>/dev/null || true
 
-      - name: Apply modifications to isolated build directory
+      - name: Apply modifications to isolated build
         run: |
           cd /tmp/kernel_build
           
@@ -156,12 +153,10 @@ jobs:
         run: |
           sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
 
-      - name: Build kernel completely in one go (no config loop)
+      - name: Configure kernel (proper out-of-tree)
         run: |
           cd /tmp/kernel_build
           
-          export ROOT_DIR=/tmp/kernel_build
-          export KERNEL_DIR=.
           export ARCH=arm64
           export SUBARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
@@ -170,22 +165,39 @@ jobs:
           export LLVM=1
           export LLVM_IAS=1
           export KCONFIG_NOTIMESTAMP=1
-          export KBUILD_OUTPUT=/tmp/kernel_out
-          export O=/tmp/kernel_out
-          unset KBUILD_OUTPUT
-          unset O
           
-          # Create output directory OUTSIDE source
+          # Create output directory OUTSIDE source tree
           mkdir -p /tmp/kernel_out
           
-          # Single make call: configure + build everything - NO INTERMEDIATE MAKE CALLS
-          # This avoids the config regeneration loop completely
+          # Configure with explicit out-of-tree build
+          make KBUILD_OUTPUT=/tmp/kernel_out O=/tmp/kernel_out mrproper 2>/dev/null || true
+          make KBUILD_OUTPUT=/tmp/kernel_out O=/tmp/kernel_out \
+            zuma_defconfig \
+            KSU=y KPROBES=y EXT4_FS=y \
+            BLUETOOTH_POWERSAVE_EXCLUDE=y WIFI_POWERSAVE_EXCLUDE=y \
+            DEBUG_REBOOT=y LOCALVERSION="-kernelsu-next"
+          make KBUILD_OUTPUT=/tmp/kernel_out O=/tmp/kernel_out syncconfig
+          
+          # Verify config exists
+          ls -la /tmp/kernel_out/.config
+
+      - name: Build kernel + dtbs + modules
+        run: |
+          cd /tmp/kernel_build
+          
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+          export CLANG_TRIPLE=aarch64-linux-gnu-
+          export LLVM=1
+          export LLVM_IAS=1
+          export KCONFIG_NOTIMESTAMP=1
+          
+          # Build everything in ONE make call
           make -j$(nproc) \
             LLVM=1 LLVM_IAS=1 CLANG_TRIPLE=aarch64-linux-gnu- \
             KBUILD_OUTPUT=/tmp/kernel_out O=/tmp/kernel_out \
-            KSU=y KPROBES=y EXT4_FS=y \
-            BLUETOOTH_POWERSAVE_EXCLUDE=y WIFI_POWERSAVE_EXCLUDE=y \
-            DEBUG_REBOOT=y LOCALVERSION="-kernelsu-next" \
             Image dtbs modules
           
           # Verify outputs
@@ -199,17 +211,14 @@ jobs:
           export ARCH=arm64
           export SUBARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
-          export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+          export CROSS_COMPILE_ARM32=arm-linux-gneabi-
           export CLANG_TRIPLE=aarch64-linux-gnu-
           export LLVM=1
           export LLVM_IAS=1
           export KCONFIG_NOTIMESTAMP=1
-          export KBUILD_OUTPUT=/tmp/kernel_out
-          export O=/tmp/kernel_out
-          unset KBUILD_OUTPUT
-          unset O
           
-          make O=/tmp/kernel_out INSTALL_MOD_PATH=${{ env.DIST_DIR }}/modules modules_install
+          make KBUILD_OUTPUT=/tmp/kernel_out O=/tmp/kernel_out \
+            INSTALL_MOD_PATH=${{ env.DIST_DIR }}/modules modules_install
           find ${{ env.DIST_DIR }}/modules -name "*.ko" -exec aarch64-linux-gnu-strip --strip-unneeded {} \; 2>/dev/null || true
 
       - name: Prepare artifacts
