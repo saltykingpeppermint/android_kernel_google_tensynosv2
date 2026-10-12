@@ -146,8 +146,8 @@ jobs:
           # Copy build config constants
           cp ${{ env.OUR_REPO_DIR }}/build.config.constants build.config.constants
           
-          # Copy KernelSU Next to source
-          cp -r kernelsu-next kernelsu-next
+          # KernelSU Next already exists from checkout step
+          # cp -r kernelsu-next kernelsu-next  # Already there from checkout
           
           export ARCH=arm64
           export SUBARCH=arm64
