@@ -73,7 +73,6 @@ jobs:
           DIST_DIR="${2}"
           BUILD_TYPE="${3}"
           
-          # Create isolated build directory
           BUILD_DIR="/tmp/kernel_build"
           OUT_DIR="/tmp/kernel_out"
           
@@ -208,45 +207,3 @@ jobs:
           echo "=== Build completed successfully! ==="
           SCRIPTEOF
           chmod +x /tmp/build_kernel.sh
-
-      - name: Setup build environment
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y bc bison build-essential ccache cpio flex git libelf-dev libncurses5-dev libssl-dev python3-full python3-dev unzip wget zip zlib1g-dev
-
-      - name: Install LLVM/Clang
-        run: |
-          wget -q https://github.com/llvm/llvm-project/releases/download/llvmorg-17.0.6/clang+llvm-17.0.6-x86_64-linux-gnu-ubuntu-22.04.tar.xz
-          tar -xf clang+llvm-17.0.6-x86_64-linux-gnu-ubuntu-22.04.tar.xz
-          sudo mv clang+llvm-17.0.6-x86_64-linux-gnu-ubuntu-22.04 /opt/llvm
-          echo "/opt/llvm/bin" >> $GITHUB_PATH
-          clang --version
-
-      - name: Install cross-compilation toolchain
-        run: |
-          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
-
-      - name: Build kernel (single script, no config loop)
-        run: |
-          /tmp/build_kernel.sh "${KERNEL_SRC_DIR}" "${DIST_DIR}" "${{ matrix.build_type }}"
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: kernel-${{ matrix.build_type }}
-          path: |
-            ${{ env.DIST_DIR }}/*
-          retention-days: 30
-
-      - name: Create release (on tag push)
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v1
-        with:
-          files: |
-            ${{ env.DIST_DIR }}/*.zip
-            ${{ env.DIST_DIR }}/Image-*
-            ${{ env.DIST_DIR }}/config-*
-            ${{ env.DIST_DIR }}/vmlinux-*
-          generate_release_notes: true
-          draft: false
-          prerelease: false
