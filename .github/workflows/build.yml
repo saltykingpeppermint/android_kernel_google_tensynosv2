@@ -111,11 +111,28 @@ jobs:
         run: |
           sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
 
-      - name: Generate frozen .config (Step 1)
+      - name: Build kernel (single isolated script, no config loop)
         run: |
-          cd ${{ env.KERNEL_SRC_DIR }}
+          cat > /tmp/build_kernel.sh << 'SCRIPTEOF'
+          #!/bin/bash
+          set -euo pipefail
           
-          # Apply our modifications
+          KERNEL_SRC="${1}"
+          DIST_DIR="${2}"
+          BUILD_TYPE="${3}"
+          
+          BUILD_DIR="/tmp/kernel_build"
+          OUT_DIR="/tmp/kernel_out"
+          
+          echo "=== Setting up isolated build environment ==="
+          rm -rf "${BUILD_DIR}"
+          cp -r "${KERNEL_SRC}" "${BUILD_DIR}"
+          cp -r "${KERNEL_SRC}/kernelsu-next" "${BUILD_DIR}/kernelsu-next"
+          
+          cd "${BUILD_DIR}"
+          make mrproper 2>/dev/null || true
+          
+          # Apply modifications
           if ! grep -q "kernelsu-next/kernel/Kconfig" Kconfig; then
             if grep -q 'source "security/Kconfig"' Kconfig; then
               sed -i '/source "security\/Kconfig"/a source "kernelsu-next\/kernel\/Kconfig"' Kconfig
@@ -132,19 +149,18 @@ jobs:
             printf '\n# KernelSU Next\nsource "$(srctree)/kernelsu-next/kernel/Kconfig"\n\nconfig BLUETOOTH_POWERSAVE_EXCLUDE\n  bool "Exclude Bluetooth from power saving"\n  default y\n  help\n    Exclude Bluetooth from power saving to work around hardware issues.\n\nconfig WIFI_POWERSAVE_EXCLUDE\n  bool "Exclude WiFi from power saving"\n  default y\n  help\n    Exclude WiFi from power saving to work around hardware issues.\n' >> google-devices/zuma/Kconfig.ext.zuma
           fi
           
-          cp "${{ env.OUR_REPO_DIR }}/google-modules/bluetooth/broadcom/nitrous.c" \
+          cp "${KERNEL_SRC}/google-modules/bluetooth/broadcom/nitrous.c" \
              google-modules/bluetooth/broadcom/nitrous.c
-          cp "${{ env.OUR_REPO_DIR }}/google-modules/wlan/bcm4389/Kbuild" \
+          cp "${KERNEL_SRC}/google-modules/wlan/bcm4389/Kbuild" \
              google-modules/wlan/bcm4389/Kbuild
-          cp "${{ env.OUR_REPO_DIR }}/google-modules/power/reset/pixel-zuma-reboot.c" \
+          cp "${KERNEL_SRC}/google-modules/power/reset/pixel-zuma-reboot.c" \
              google-modules/power/reset/pixel-zuma-reboot.c
           
           if ! grep -q "CONFIG_KSU=y" build.config.common; then
             printf '\nCONFIG_KSU=y\nCONFIG_KPROBES=y\nCONFIG_EXT4_FS=y\nCONFIG_BLUETOOTH_POWERSAVE_EXCLUDE=y\nCONFIG_WIFI_POWERSAVE_EXCLUDE=y\n' >> build.config.common
           fi
           
-          # Copy build config constants
-          cp ${{ env.OUR_REPO_DIR }}/build.config.constants build.config.constants
+          cp "${KERNEL_SRC}/build.config.constants" build.config.constants
           
           export ARCH=arm64
           export SUBARCH=arm64
@@ -155,96 +171,109 @@ jobs:
           export LLVM_IAS=1
           export KCONFIG_NOTIMESTAMP=1
           
-          # Generate frozen .config - COMPLETELY SEPARATE STEP
-          make O=out mrproper 2>/dev/null || true
-          make O=out zuma_defconfig \
+          OUT_DIR="/tmp/kernel_out"
+          mkdir -p "${OUT_DIR}"
+          
+          echo "=== Generating complete .config (definitive config) ==="
+          
+          # Generate complete .config in ONE GO - no intermediate steps
+          make KBUILD_OUTPUT="${OUT_DIR}" O="${OUT_DIR}" mrproper 2>/dev/null || true
+          make KBUILD_OUTPUT="${OUT_DIR}" O="${OUT_DIR}" \
+            zuma_defconfig \
             KSU=y KPROBES=y EXT4_FS=y \
             BLUETOOTH_POWERSAVE_EXCLUDE=y WIFI_POWERSAVE_EXCLUDE=y \
             DEBUG_REBOOT=y LOCALVERSION="-kernelsu-next"
           
-          # Apply our custom configs
-          ./scripts/config --file out/.config \
+          # Apply our custom configs via scripts/config
+          ./scripts/config --file "${OUT_DIR}/.config" \
             --enable KSU --enable KPROBES --enable EXT4_FS \
             --enable BLUETOOTH_POWERSAVE_EXCLUDE --enable WIFI_POWERSAVE_EXCLUDE \
             --enable DEBUG_REBOOT --set-str LOCALVERSION "-kernelsu-next"
           
-          make O=out olddefconfig
-          make O=out syncconfig
+          # Finalize config - NO MORE CONFIG CHANGES AFTER THIS
+          make KBUILD_OUTPUT="${OUT_DIR}" O="${OUT_DIR}" KCONFIG_NOTIMESTAMP=1 olddefconfig
+          make KBUILD_OUTPUT="${OUT_DIR}" O="${OUT_DIR}" KCONFIG_NOTIMESTAMP=1 syncconfig
           
-          # Save frozen .config
-          cp out/.config frozen.config
-          ls -la frozen.config
-
-      - name: Build kernel (frozen .config, Step 2)
-        run: |
-          cd ${{ env.KERNEL_SRC_DIR }}
+          # Verify config exists
+          ls -la "${OUT_DIR}/.config"
           
-          export ARCH=arm64
-          export SUBARCH=arm64
-          export CROSS_COMPILE=aarch64-linux-gnu-
-          export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
-          export CLANG_TRIPLE=aarch64-linux-gnu-
-          export LLVM=1
-          export LLVM_IAS=1
+          echo "=== Building kernel (single make call, no config changes) ==="
+          
+          # Build with explicit env vars and single make call
           export KCONFIG_NOTIMESTAMP=1
+          export KBUILD_OUTPUT="${OUT_DIR}"
+          export O="${OUT_DIR}"
           
-          # Restore frozen .config to out/
-          cp frozen.config out/.config
-          
-          # Build WITHOUT touching config system - single make call
-          make O=out \
-            LLVM=1 \
-            LLVM_IAS=1 \
-            CLANG_TRIPLE=aarch64-linux-gnu- \
+          # Run make from source directory with explicit output dir
+          cd "${BUILD_DIR}"
+          make -j$(nproc) \
+            LLVM=1 LLVM_IAS=1 CLANG_TRIPLE=aarch64-linux-gnu- \
+            KBUILD_OUTPUT="${OUT_DIR}" O="${OUT_DIR}" \
             KCONFIG_NOTIMESTAMP=1 \
             Image dtbs modules
           
           # Verify outputs
-          ls -la out/arch/arm64/boot/Image
-          ls -la out/.config
-
-      - name: Install modules
-        run: |
-          cd ${{ env.KERNEL_SRC_DIR }}
+          ls -la "${OUT_DIR}/arch/arm64/boot/Image"
+          ls -la "${OUT_DIR}/.config"
           
-          export ARCH=arm64
-          export CROSS_COMPILE=aarch64-linux-gnu-
-          export KCONFIG_NOTIMESTAMP=1
+          # Install modules
+          make KBUILD_OUTPUT="${OUT_DIR}" O="${OUT_DIR}" \
+            INSTALL_MOD_PATH="/tmp/modules" modules_install
           
-          make O=out INSTALL_MOD_PATH=${{ env.DIST_DIR }}/modules modules_install
-          find ${{ env.DIST_DIR }}/modules -name "*.ko" -exec aarch64-linux-gnu-strip --strip-unneeded {} \; 2>/dev/null || true
-
-      - name: Prepare artifacts
-        run: |
-          mkdir -p ${{ env.DIST_DIR }}
+          # Copy artifacts
+          mkdir -p "${DIST_DIR}"
+          cp "${OUT_DIR}/arch/arm64/boot/Image" "${DIST_DIR}/Image-${BUILD_TYPE}"
+          cp "${OUT_DIR}/.config" "${DIST_DIR}/config-${BUILD_TYPE}"
+          cp "${OUT_DIR}/vmlinux" "${DIST_DIR}/vmlinux-${BUILD_TYPE}" 2>/dev/null || true
+          mkdir -p "${DIST_DIR}/dtb"
+          cp "${OUT_DIR}/arch/arm64/boot/dts/google/"*.dtb "${DIST_DIR}/dtb/" 2>/dev/null || true
           
-          cp out/arch/arm64/boot/Image ${{ env.DIST_DIR }}/Image-${{ matrix.build_type }}
-          cp out/.config ${{ env.DIST_DIR }}/config-${{ matrix.build_type }}
-          cp vmlinux ${{ env.DIST_DIR }}/vmlinux-${{ matrix.build_type }} 2>/dev/null || true
-          mkdir -p ${{ env.DIST_DIR }}/dtb
-          cp out/arch/arm64/boot/dts/google/*.dtb ${{ env.DIST_DIR }}/dtb/ 2>/dev/null || true
-          
-          if [ -d "out/modules" ]; then
-            mkdir -p ${{ env.DIST_DIR }}/modules-${{ matrix.build_type }}
-            cp -r out/modules/* ${{ env.DIST_DIR }}/modules-${{ matrix.build_type }}/ 2>/dev/null || true
+          # Modules
+          if [ -d "/tmp/modules" ]; then
+            mkdir -p "${DIST_DIR}/modules-${BUILD_TYPE}"
+            cp -r /tmp/modules/* "${DIST_DIR}/modules-${BUILD_TYPE}/" 2>/dev/null || true
           fi
-
-      - name: Create AnyKernel3 flashable zip
-        run: |
-          cd ${{ env.KERNEL_SRC_DIR }}
+          
+          # Create AnyKernel3 zip
+          cd /tmp/kernel_build
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git anykernel3
           rm -f anykernel3/Image anykernel3/dtb
           rm -rf anykernel3/modules
-          cp out/arch/arm64/boot/Image anykernel3/
+          cp /tmp/kernel_out/arch/arm64/boot/Image anykernel3/
           mkdir -p anykernel3/dtb
-          cp out/arch/arm64/boot/dts/google/*.dtb anykernel3/dtb/ 2>/dev/null || true
+          cp /tmp/kernel_out/arch/arm64/boot/dts/google/*.dtb anykernel3/dtb/ 2>/dev/null || true
           mkdir -p anykernel3/modules
-          if [ -d "out/modules" ]; then
-            cp -r out/modules/lib/modules/* anykernel3/modules/ 2>/dev/null || true
+          if [ -d "/tmp/modules" ]; then
+            cp -r /tmp/modules/lib/modules/* anykernel3/modules/ 2>/dev/null || true
           fi
           printf 'properties() {\n  kernel.string=Tensor G3 KernelSU Next\n  do.devicecheck=1\n  do.modules=1\n  do.cleanup=1\n  do.cleanuponabort=1\n  device.name1=zuma\n  device.name2=shusky\n  device.name3=husky\n  device.name4=akita\n  device.name5=tokay\n  supported.versions=14\n}\n. tools/ak3-core.sh\ndump_boot\nwrite_boot\nif [ "$do.modules" == 1 ]; then\n  for module in modules/*; do\n    if [ -f "$module" ]; then\n      ui_print "Installing $(basename $module)..."\n      cp -f "$module" "$ramdisk/lib/modules/"\n    fi\n  done\nfi\n' > anykernel3/anykernel.sh
           cd anykernel3
-          zip -r9 ${{ env.DIST_DIR }}/KernelSU-Next-zuma-${{ matrix.build_type }}-${{ github.run_number }}.zip . -x ".git*" -x "README.md" -x "*.zip"
+          zip -r9 "${DIST_DIR}/KernelSU-Next-zuma-${BUILD_TYPE}-${GITHUB_RUN_NUMBER}.zip" . -x ".git*" -x "README.md" -x "*.zip"
+          
+          echo "=== Build completed successfully! ==="
+          SCRIPTEOF
+          chmod +x /tmp/build_kernel.sh
+
+      - name: Setup build environment
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison build-essential ccache cpio flex git libelf-dev libncurses5-dev libssl-dev python3-full python3-dev unzip wget zip zlib1g-dev
+
+      - name: Install LLVM/Clang
+        run: |
+          wget -q https://github.com/llvm/llvm-project/releases/download/llvmorg-17.0.6/clang+llvm-17.0.6-x86_64-linux-gnu-ubuntu-22.04.tar.xz
+          tar -xf clang+llvm-17.0.6-x86_64-linux-gnu-ubuntu-22.04.tar.xz
+          sudo mv clang+llvm-17.0.6-x86_64-linux-gnu-ubuntu-22.04 /opt/llvm
+          echo "/opt/llvm/bin" >> $GITHUB_PATH
+          clang --version
+
+      - name: Install cross-compilation toolchain
+        run: |
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+
+      - name: Build kernel (single script, no config loop)
+        run: |
+          /tmp/build_kernel.sh "${KERNEL_SRC_DIR}" "${DIST_DIR}" "${{ matrix.build_type }}"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
