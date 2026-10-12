@@ -194,8 +194,8 @@ jobs:
           # Restore frozen .config
           cp frozen.config .config
           
-          # Build WITHOUT touching config system - single make call
-          make -j$(nproc) \
+          # Build WITHOUT touching config system - single make call with explicit output dir
+          make O=out \
             LLVM=1 \
             LLVM_IAS=1 \
             CLANG_TRIPLE=aarch64-linux-gnu- \
@@ -203,8 +203,8 @@ jobs:
             Image dtbs modules
           
           # Verify outputs
-          ls -la arch/arm64/boot/Image
-          ls -la .config
+          ls -la out/arch/arm64/boot/Image
+          ls -la out/.config
 
       - name: Install modules
         run: |
@@ -212,26 +212,24 @@ jobs:
           
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
-          export LLVM=1
-          export LLVM_IAS=1
           export KCONFIG_NOTIMESTAMP=1
           
-          make INSTALL_MOD_PATH=${{ env.DIST_DIR }}/modules modules_install
+          make O=out INSTALL_MOD_PATH=${{ env.DIST_DIR }}/modules modules_install
           find ${{ env.DIST_DIR }}/modules -name "*.ko" -exec aarch64-linux-gnu-strip --strip-unneeded {} \; 2>/dev/null || true
 
       - name: Prepare artifacts
         run: |
           mkdir -p ${{ env.DIST_DIR }}
           
-          cp arch/arm64/boot/Image ${{ env.DIST_DIR }}/Image-${{ matrix.build_type }}
+          cp out/arch/arm64/boot/Image ${{ env.DIST_DIR }}/Image-${{ matrix.build_type }}
           cp .config ${{ env.DIST_DIR }}/config-${{ matrix.build_type }}
           cp vmlinux ${{ env.DIST_DIR }}/vmlinux-${{ matrix.build_type }} 2>/dev/null || true
           mkdir -p ${{ env.DIST_DIR }}/dtb
           cp arch/arm64/boot/dts/google/*.dtb ${{ env.DIST_DIR }}/dtb/ 2>/dev/null || true
           
-          if [ -d "${{ env.DIST_DIR }}/modules" ]; then
+          if [ -d "out/modules" ]; then
             mkdir -p ${{ env.DIST_DIR }}/modules-${{ matrix.build_type }}
-            cp -r ${{ env.DIST_DIR }}/modules/* ${{ env.DIST_DIR }}/modules-${{ matrix.build_type }}/ 2>/dev/null || true
+            cp -r out/modules/* ${{ env.DIST_DIR }}/modules-${{ matrix.build_type }}/ 2>/dev/null || true
           fi
 
       - name: Create AnyKernel3 flashable zip
@@ -240,12 +238,12 @@ jobs:
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git anykernel3
           rm -f anykernel3/Image anykernel3/dtb
           rm -rf anykernel3/modules
-          cp arch/arm64/boot/Image anykernel3/
+          cp out/arch/arm64/boot/Image anykernel3/
           mkdir -p anykernel3/dtb
-          cp arch/arm64/boot/dts/google/*.dtb anykernel3/dtb/ 2>/dev/null || true
+          cp out/arch/arm64/boot/dts/google/*.dtb anykernel3/dtb/ 2>/dev/null || true
           mkdir -p anykernel3/modules
-          if [ -d "${{ env.DIST_DIR }}/modules" ]; then
-            cp -r ${{ env.DIST_DIR }}/modules/lib/modules/* anykernel3/modules/ 2>/dev/null || true
+          if [ -d "out/modules" ]; then
+            cp -r out/modules/lib/modules/* anykernel3/modules/ 2>/dev/null || true
           fi
           printf 'properties() {\n  kernel.string=Tensor G3 KernelSU Next\n  do.devicecheck=1\n  do.modules=1\n  do.cleanup=1\n  do.cleanuponabort=1\n  device.name1=zuma\n  device.name2=shusky\n  device.name3=husky\n  device.name4=akita\n  device.name5=tokay\n  supported.versions=14\n}\n. tools/ak3-core.sh\ndump_boot\nwrite_boot\nif [ "$do.modules" == 1 ]; then\n  for module in modules/*; do\n    if [ -f "$module" ]; then\n      ui_print "Installing $(basename $module)..."\n      cp -f "$module" "$ramdisk/lib/modules/"\n    fi\n  done\nfi\n' > anykernel3/anykernel.sh
           cd anykernel3
