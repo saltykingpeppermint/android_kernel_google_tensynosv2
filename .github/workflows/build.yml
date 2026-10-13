@@ -180,7 +180,7 @@ jobs:
             --enable BLUETOOTH_POWERSAVE_EXCLUDE --enable WIFI_POWERSAVE_EXCLUDE \
             --enable DEBUG_REBOOT --set-str LOCALVERSION "-kernelsu-next"
           
-          # Step 3: Resolve dependencies
+          # Step 4: Resolve dependencies
           make O="${OUT_DIR}" olddefconfig
           
           # Step 4: Generate auto.conf, auto.conf.cmd (CRITICAL!)
