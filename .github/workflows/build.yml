@@ -173,6 +173,10 @@ jobs:
           ls -la "${OUT_DIR}/arch/arm64/boot/Image"
           ls -la "${OUT_DIR}/.config"
           
+          # Copy frozen config to build directory's output folder (where build looks for it)
+          mkdir -p "${BUILD_DIR}/out"
+          cp frozen.config "${BUILD_DIR}/out/.config"
+          
           # Install modules
           make KBUILD_OUTPUT="${OUT_DIR}" O="${OUT_DIR}" \
             INSTALL_MOD_PATH="/tmp/modules" modules_install
