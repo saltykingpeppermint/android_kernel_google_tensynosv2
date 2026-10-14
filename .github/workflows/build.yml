@@ -154,7 +154,7 @@ jobs:
           
           echo "=== Building kernel (single make call, no config changes) ==="
           
-          # Build with explicit env vars and single make call
+          # Build with explicit env vars - MUST be exported BEFORE make, not as args
           export KCONFIG_NOTIMESTAMP=1
           export KBUILD_OUTPUT="${OUT_DIR}"
           export O="${OUT_DIR}"
@@ -163,8 +163,6 @@ jobs:
           cd "${BUILD_DIR}"
           make -j$(nproc) \
             LLVM=1 LLVM_IAS=1 CLANG_TRIPLE=aarch64-linux-gnu- \
-            KBUILD_OUTPUT="${OUT_DIR}" O="${OUT_DIR}" \
-            KCONFIG_NOTIMESTAMP=1 \
             Image dtbs modules
           
           # Verify outputs
