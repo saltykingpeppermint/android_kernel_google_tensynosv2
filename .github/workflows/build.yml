@@ -179,8 +179,15 @@ jobs:
           ls -la "${BUILD_DIR}/out/.config"
           
           # Install modules
-          make KBUILD_OUTPUT="${OUT_DIR}" O="${OUT_DIR}" \
-            INSTALL_MOD_PATH="/tmp/modules" modules_install
+          make O="${OUT_DIR}" INSTALL_MOD_PATH="/tmp/modules" modules_install
+          
+          # Build kernel with O= as make argument (required for kernel build system)
+          cd "${BUILD_DIR}"
+          make O="${OUT_DIR}" -j$(nproc) \
+            LLVM=1 LLVM_IAS=1 CLANG_TRIPLE=aarch64-linux-gnu- \
+            KCONFIG_NOTIMESTAMP=1 \
+            Image dtbs modules
+          make O="${OUT_DIR}" INSTALL_MOD_PATH="/tmp/modules" modules_install
           
           # Copy artifacts
           mkdir -p "${DIST_DIR}"
