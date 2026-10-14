@@ -63,7 +63,7 @@ jobs:
           path: ${{ env.KERNEL_SRC_DIR }}/kernelsu-next
           submodules: true
 
-      - name: Build kernel (single isolated script - no config loop possible)
+      - name: Build kernel (single isolated script - NO config loop possible)
         run: |
           cat > /tmp/build_kernel.sh << 'SCRIPTEOF'
           #!/bin/bash
