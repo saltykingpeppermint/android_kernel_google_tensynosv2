@@ -175,7 +175,8 @@ jobs:
           
           # Copy frozen config to build directory's output folder (where build looks for it)
           mkdir -p "${BUILD_DIR}/out"
-          cp frozen.config "${BUILD_DIR}/out/.config"
+          cp -v frozen.config "${BUILD_DIR}/out/.config"
+          ls -la "${BUILD_DIR}/out/.config"
           
           # Install modules
           make KBUILD_OUTPUT="${OUT_DIR}" O="${OUT_DIR}" \
