@@ -149,11 +149,12 @@ jobs:
           make KBUILD_OUTPUT="${OUT_DIR}" O="${OUT_DIR}" KCONFIG_NOTIMESTAMP=1 olddefconfig
           make KBUILD_OUTPUT="${OUT_DIR}" O="${OUT_DIR}" KCONFIG_NOTIMESTAMP=1 syncconfig
           
+          # Save frozen .config from output directory
+          cp "${OUT_DIR}/.config" frozen.config
+          ls -la frozen.config
+          
           # Verify config exists
           ls -la "${OUT_DIR}/.config"
-          
-          # Copy frozen config to output directory (where build looks for it)
-          cp frozen.config "${OUT_DIR}/.config"
           
           echo "=== Building kernel (single make call, no config changes) ==="
           
