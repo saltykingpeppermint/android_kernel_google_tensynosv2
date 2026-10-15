@@ -94,9 +94,56 @@ jobs:
             printf '\nCONFIG_KSU=y\nCONFIG_KPROBES=y\nCONFIG_EXT4_FS=y\nCONFIG_BLUETOOTH_POWERSAVE_EXCLUDE=y\nCONFIG_WIFI_POWERSAVE_EXCLUDE=y\n' >> build.config.common
           fi
 
-      - name: Build kernel (in-tree, no config loop)
+      - name: Build kernel in isolated directory
         run: |
-          cd ${{ env.KERNEL_SRC_DIR }}
+          # Create completely isolated build directory OUTSIDE the source tree
+          BUILD_DIR="/tmp/kernel_build"
+          OUT_DIR="/tmp/kernel_out"
+          
+          echo "=== Setting up isolated build environment ==="
+          rm -rf "${BUILD_DIR}" "${OUT_DIR}"
+          mkdir -p "${BUILD_DIR}" "${OUT_DIR}"
+          
+          # Copy kernel source to isolated build directory
+          cp -r ${{ env.KERNEL_SRC_DIR }}/* "${BUILD_DIR}/"
+          cp -r ${{ env.KERNEL_SRC_DIR }}/kernelsu-next "${BUILD_DIR}/kernelsu-next"
+          
+          cd "${BUILD_DIR}"
+          make mrproper 2>/dev/null || true
+          
+          # Apply modifications to isolated build directory
+          if ! grep -q "kernelsu-next/kernel/Kconfig" Kconfig; then
+            if grep -q 'source "security/Kconfig"' Kconfig; then
+              sed -i '/source "security\/Kconfig"/a source "kernelsu-next\/kernel\/Kconfig"' Kconfig
+            elif grep -q 'source "crypto/Kconfig"' Kconfig; then
+              sed -i '/source "crypto\/Kconfig"/i source "kernelsu-next\/kernel\/Kconfig"' Kconfig
+            elif grep -q 'source "lib/Kconfig"' Kconfig; then
+              sed -i '/source "lib\/Kconfig"/i source "kernelsu-next\/kernel\/Kconfig"' Kconfig
+            else
+              sed -i '/choice/i source "kernelsu-next\/kernel\/Kconfig"' Kconfig
+            fi
+          fi
+          
+          if ! grep -q "BLUETOOTH_POWERSAVE_EXCLUDE" google-devices/zuma/Kconfig.ext.zuma; then
+            printf '\n# KernelSU Next\nsource "$(srctree)/kernelsu-next/kernel/Kconfig"\n\nconfig BLUETOOTH_POWERSAVE_EXCLUDE\n  bool "Exclude Bluetooth from power saving"\n  default y\n  help\n    Exclude Bluetooth from power saving to work around hardware issues.\n\nconfig WIFI_POWERSAVE_EXCLUDE\n  bool "Exclude WiFi from power saving"\n  default y\n  help\n    Exclude WiFi from power saving to work around hardware issues.\n' >> google-devices/zuma/Kconfig.ext.zuma
+          fi
+          
+          cp ${{ env.KERNEL_SRC_DIR }}/google-modules/bluetooth/broadcom/nitrous.c \
+             google-modules/bluetooth/broadcom/nitrous.c
+          cp ${{ env.KERNEL_SRC_DIR }}/google-modules/wlan/bcm4389/Kbuild \
+             google-modules/wlan/bcm4389/Kbuild
+          cp ${{ env.KERNEL_SRC_DIR }}/google-modules/power/reset/pixel-zuma-reboot.c \
+             google-modules/power/reset/pixel-zuma-reboot.c
+          
+          if ! grep -q "CONFIG_KSU=y" build.config.common; then
+            printf '\nCONFIG_KSU=y\nCONFIG_KPROBES=y\nCONFIG_EXT4_FS=y\nCONFIG_BLUETOOTH_POWERSAVE_EXCLUDE=y\nCONFIG_WIFI_POWERSAVE_EXCLUDE=y\n' >> build.config.common
+          fi
+          
+          cp ${{ env.KERNEL_SRC_DIR }}/build.config.constants build.config.constants
+
+      - name: Build kernel (in-tree in isolated directory)
+        run: |
+          cd /tmp/kernel_build
           
           export ARCH=arm64
           export SUBARCH=arm64
@@ -107,8 +154,17 @@ jobs:
           export LLVM_IAS=1
           export KCONFIG_NOTIMESTAMP=1
           
-          # Install lld (LLVM linker) required for building
-          sudo apt-get update && sudo apt-get install -y lld
+          # Apply our configs to build config
+          echo 'CONFIG_KSU=y' >> build.config.common
+          echo 'CONFIG_KPROBES=y' >> build.config.common
+          echo 'CONFIG_EXT4_FS=y' >> build.config.common
+          echo 'CONFIG_BLUETOOTH_POWERSAVE_EXCLUDE=y' >> build.config.common
+          echo 'CONFIG_WIFI_POWERSAVE_EXCLUDE=y' >> build.config.common
+          echo 'CONFIG_DEBUG_REBOOT=y' >> build.config.common
+          echo 'CONFIG_LOCALVERSION="-kernelsu-next"' >> build.config.common
+          
+          # Copy build config constants
+          cp ${{ env.KERNEL_SRC_DIR }}/build.config.constants build.config.constants
           
           # Apply our configs to build config
           echo 'CONFIG_KSU=y' >> build.config.common
@@ -120,33 +176,9 @@ jobs:
           echo 'CONFIG_LOCALVERSION="-kernelsu-next"' >> build.config.common
           
           # Copy build config constants
-          cp ${{ env.OUR_REPO_DIR }}/build.config.constants build.config.constants
+          cp ${{ env.KERNEL_SRC_DIR }}/build.config.constants build.config.constants
           
-          # KernelSU Next already exists from checkout (kernelsu-next/)
-          # No need to copy it
-          
-          # Copy modified files
-          cp ${{ env.OUR_REPO_DIR }}/google-modules/bluetooth/broadcom/nitrous.c \
-             google-modules/bluetooth/broadcom/nitrous.c
-          cp ${{ env.OUR_REPO_DIR }}/google-modules/wlan/bcm4389/Kbuild \
-             google-modules/wlan/bcm4389/Kbuild
-          cp ${{ env.OUR_REPO_DIR }}/google-modules/power/reset/pixel-zuma-reboot.c \
-             google-modules/power/reset/pixel-zuma-reboot.c
-          
-          # Apply our configs to build config
-          echo 'CONFIG_KSU=y' >> build.config.common
-          echo 'CONFIG_KPROBES=y' >> build.config.common
-          echo 'CONFIG_EXT4_FS=y' >> build.config.common
-          echo 'CONFIG_BLUETOOTH_POWERSAVE_EXCLUDE=y' >> build.config.common
-          echo 'CONFIG_WIFI_POWERSAVE_EXCLUDE=y' >> build.config.common
-          echo 'CONFIG_DEBUG_REBOOT=y' >> build.config.common
-          echo 'CONFIG_LOCALVERSION="-kernelsu-next"' >> build.config.common
-          
-          # Copy build config constants
-          cp ${{ env.OUR_REPO_DIR }}/build.config.constants build.config.constants
-          
-          # Clean and configure - force in-tree build, remove any out directory
-          rm -rf out 2>/dev/null || true
+          # Clean and configure - NO O=, build in-tree in isolated directory
           make mrproper 2>/dev/null || true
           make zuma_defconfig \
             KSU=y KPROBES=y EXT4_FS=y \
@@ -175,7 +207,7 @@ jobs:
 
       - name: Install modules
         run: |
-          cd ${{ env.KERNEL_SRC_DIR }}
+          cd /tmp/kernel_build
           
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
@@ -188,11 +220,11 @@ jobs:
         run: |
           mkdir -p ${{ env.DIST_DIR }}
           
-          cp arch/arm64/boot/Image ${{ env.DIST_DIR }}/Image-${{ matrix.build_type }}
-          cp .config ${{ env.DIST_DIR }}/config-${{ matrix.build_type }}
-          cp vmlinux ${{ env.DIST_DIR }}/vmlinux-${{ matrix.build_type }} 2>/dev/null || true
+          cp /tmp/kernel_build/arch/arm64/boot/Image ${{ env.DIST_DIR }}/Image-${{ matrix.build_type }}
+          cp /tmp/kernel_build/.config ${{ env.DIST_DIR }}/config-${{ matrix.build_type }}
+          cp /tmp/kernel_build/vmlinux ${{ env.DIST_DIR }}/vmlinux-${{ matrix.build_type }} 2>/dev/null || true
           mkdir -p ${{ env.DIST_DIR }}/dtb
-          cp arch/arm64/boot/dts/google/*.dtb ${{ env.DIST_DIR }}/dtb/ 2>/dev/null || true
+          cp /tmp/kernel_build/arch/arm64/boot/dts/google/*.dtb ${{ env.DIST_DIR }}/dtb/ 2>/dev/null || true
           
           if [ -d "modules" ]; then
             mkdir -p ${{ env.DIST_DIR }}/modules-${{ matrix.build_type }}
@@ -201,7 +233,7 @@ jobs:
 
       - name: Create AnyKernel3 flashable zip
         run: |
-          cd ${{ env.KERNEL_SRC_DIR }}
+          cd /tmp/kernel_build
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git anykernel3
           rm -f anykernel3/Image anykernel3/dtb
           rm -rf anykernel3/modules
