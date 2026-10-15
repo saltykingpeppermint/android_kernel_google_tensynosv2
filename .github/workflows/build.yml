@@ -94,54 +94,7 @@ jobs:
             printf '\nCONFIG_KSU=y\nCONFIG_KPROBES=y\nCONFIG_EXT4_FS=y\nCONFIG_BLUETOOTH_POWERSAVE_EXCLUDE=y\nCONFIG_WIFI_POWERSAVE_EXCLUDE=y\n' >> build.config.common
           fi
 
-      - name: Build kernel in isolated directory
-        run: |
-          # Create completely isolated build directory OUTSIDE the source tree
-          BUILD_DIR="/tmp/kernel_build"
-          OUT_DIR="/tmp/kernel_out"
-          
-          echo "=== Setting up isolated build environment ==="
-          rm -rf "${BUILD_DIR}" "${OUT_DIR}"
-          mkdir -p "${BUILD_DIR}" "${OUT_DIR}"
-          
-          # Copy kernel source to isolated build directory
-          cp -r ${{ env.KERNEL_SRC_DIR }}/* "${BUILD_DIR}/"
-          cp -r ${{ env.KERNEL_SRC_DIR }}/kernelsu-next "${BUILD_DIR}/kernelsu-next"
-          
-          cd "${BUILD_DIR}"
-          make mrproper 2>/dev/null || true
-          
-          # Apply modifications to isolated build directory
-          if ! grep -q "kernelsu-next/kernel/Kconfig" Kconfig; then
-            if grep -q 'source "security/Kconfig"' Kconfig; then
-              sed -i '/source "security\/Kconfig"/a source "kernelsu-next\/kernel\/Kconfig"' Kconfig
-            elif grep -q 'source "crypto/Kconfig"' Kconfig; then
-              sed -i '/source "crypto\/Kconfig"/i source "kernelsu-next\/kernel\/Kconfig"' Kconfig
-            elif grep -q 'source "lib/Kconfig"' Kconfig; then
-              sed -i '/source "lib\/Kconfig"/i source "kernelsu-next\/kernel\/Kconfig"' Kconfig
-            else
-              sed -i '/choice/i source "kernelsu-next\/kernel\/Kconfig"' Kconfig
-            fi
-          fi
-          
-          if ! grep -q "BLUETOOTH_POWERSAVE_EXCLUDE" google-devices/zuma/Kconfig.ext.zuma; then
-            printf '\n# KernelSU Next\nsource "$(srctree)/kernelsu-next/kernel/Kconfig"\n\nconfig BLUETOOTH_POWERSAVE_EXCLUDE\n  bool "Exclude Bluetooth from power saving"\n  default y\n  help\n    Exclude Bluetooth from power saving to work around hardware issues.\n\nconfig WIFI_POWERSAVE_EXCLUDE\n  bool "Exclude WiFi from power saving"\n  default y\n  help\n    Exclude WiFi from power saving to work around hardware issues.\n' >> google-devices/zuma/Kconfig.ext.zuma
-          fi
-          
-          cp ${{ env.KERNEL_SRC_DIR }}/google-modules/bluetooth/broadcom/nitrous.c \
-             google-modules/bluetooth/broadcom/nitrous.c
-          cp ${{ env.KERNEL_SRC_DIR }}/google-modules/wlan/bcm4389/Kbuild \
-             google-modules/wlan/bcm4389/Kbuild
-          cp ${{ env.KERNEL_SRC_DIR }}/google-modules/power/reset/pixel-zuma-reboot.c \
-             google-modules/power/reset/pixel-zuma-reboot.c
-          
-          if ! grep -q "CONFIG_KSU=y" build.config.common; then
-            printf '\nCONFIG_KSU=y\nCONFIG_KPROBES=y\nCONFIG_EXT4_FS=y\nCONFIG_BLUETOOTH_POWERSAVE_EXCLUDE=y\nCONFIG_WIFI_POWERSAVE_EXCLUDE=y\n' >> build.config.common
-          fi
-          
-          cp ${{ env.KERNEL_SRC_DIR }}/build.config.constants build.config.constants
-
-      - name: Build kernel (in-tree in isolated directory)
+      - name: Build kernel (in-tree, no config loop)
         run: |
           cd /tmp/kernel_build
           
@@ -154,17 +107,8 @@ jobs:
           export LLVM_IAS=1
           export KCONFIG_NOTIMESTAMP=1
           
-          # Apply our configs to build config
-          echo 'CONFIG_KSU=y' >> build.config.common
-          echo 'CONFIG_KPROBES=y' >> build.config.common
-          echo 'CONFIG_EXT4_FS=y' >> build.config.common
-          echo 'CONFIG_BLUETOOTH_POWERSAVE_EXCLUDE=y' >> build.config.common
-          echo 'CONFIG_WIFI_POWERSAVE_EXCLUDE=y' >> build.config.common
-          echo 'CONFIG_DEBUG_REBOOT=y' >> build.config.common
-          echo 'CONFIG_LOCALVERSION="-kernelsu-next"' >> build.config.common
-          
-          # Copy build config constants
-          cp ${{ env.KERNEL_SRC_DIR }}/build.config.constants build.config.constants
+          # Install lld (LLVM linker) required for building
+          sudo apt-get update && sudo apt-get install -y lld
           
           # Apply our configs to build config
           echo 'CONFIG_KSU=y' >> build.config.common
