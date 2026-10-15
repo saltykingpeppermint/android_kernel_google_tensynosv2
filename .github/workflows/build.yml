@@ -145,7 +145,8 @@ jobs:
           # Copy build config constants
           cp ${{ env.OUR_REPO_DIR }}/build.config.constants build.config.constants
           
-          # Clean and configure
+          # Clean and configure - force in-tree build, remove any out directory
+          rm -rf out 2>/dev/null || true
           make mrproper 2>/dev/null || true
           make zuma_defconfig \
             KSU=y KPROBES=y EXT4_FS=y \
