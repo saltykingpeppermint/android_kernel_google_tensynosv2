@@ -107,6 +107,9 @@ jobs:
           export LLVM_IAS=1
           export KCONFIG_NOTIMESTAMP=1
           
+          # Install lld (LLVM linker) required for building
+          sudo apt-get update && sudo apt-get install -y lld
+          
           # Apply our configs to build config
           echo 'CONFIG_KSU=y' >> build.config.common
           echo 'CONFIG_KPROBES=y' >> build.config.common
