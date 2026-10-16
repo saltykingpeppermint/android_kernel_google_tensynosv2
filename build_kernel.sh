@@ -176,11 +176,16 @@ configure_kernel() {
     
     make O="${BUILD_DIR}" "${DEFCONFIG}"
     
-    # Enable additional configs
-    # MODULES must come first: zuma_defconfig has no CONFIG_MODULES entry, and
-    # without it olddefconfig clamps every tristate `=m` up to `=y`.
+    # Enable additional configs.
+    #
+    # NOTE: CONFIG_MODULES is deliberately DISABLED in this kernel.
+    # zuma_defconfig sets CONFIG_INTEGRATE_MODULES=y, and kernel/module/Kconfig
+    # defines MODULES with `depends on !INTEGRATE_MODULES`. With
+    # INTEGRATE_MODULES=y, scripts/Makefile.lib:20-23 folds every `=m` driver
+    # into obj-y (built straight into vmlinux/Image). There are no .ko files,
+    # and `make modules` is a hard-error target (Makefile:2047-2053). Do NOT
+    # enable MODULES here -- olddefconfig will (correctly) clamp it back off.
     ./scripts/config --file "${BUILD_DIR}/.config" \
-        --enable MODULES \
         --enable KSU \
         --enable KPROBES \
         --enable EXT4_FS \
@@ -188,10 +193,20 @@ configure_kernel() {
         --enable WIFI_POWERSAVE_EXCLUDE \
         --enable DEBUG_REBOOT \
         --set-str LOCALVERSION "-kernelsu-next"
-    
+
     # Run make olddefconfig to resolve dependencies
     make O="${BUILD_DIR}" olddefconfig
-    
+
+    # Sanity-check that the integrate-modules design and our options survived.
+    if ! grep -q '^CONFIG_INTEGRATE_MODULES=y' "${BUILD_DIR}/.config"; then
+        error "CONFIG_INTEGRATE_MODULES lost; =m drivers would NOT be built-in"
+        exit 1
+    fi
+    if ! grep -q '^CONFIG_KSU=y' "${BUILD_DIR}/.config"; then
+        error "CONFIG_KSU did not survive olddefconfig"
+        exit 1
+    fi
+
     success "Kernel configured"
 }
 
@@ -234,20 +249,29 @@ build_dtb() {
 }
 
 # Build modules
+#
+# This kernel is built with CONFIG_INTEGRATE_MODULES=y (see zuma_defconfig),
+# which makes CONFIG_MODULES unavailable (kernel/module/Kconfig: MODULES
+# depends on !INTEGRATE_MODULES). INTEGRATE_MODULES folds every `=m` driver
+# directly into vmlinux/Image via scripts/Makefile.lib:20-23, so there are no
+# loadable .ko modules to build. Calling `make modules` here is a hard-error
+# target (top Makefile:2047-2053: "The present kernel configuration has modules
+# disabled"). We therefore skip module building entirely.
 build_modules() {
     if [[ "$BUILD_MODULES" == true ]]; then
-        log "Building modules..."
-        
+        log "Checking module configuration..."
+
         cd "${KERNEL_DIR}"
-        make O="${BUILD_DIR}" -j"${JOBS}" modules
-        
-        # Install modules to staging directory
-        make O="${BUILD_DIR}" INSTALL_MOD_PATH="${MODULES_DIR}" modules_install
-        
-        # Strip modules to reduce size
-        find "${MODULES_DIR}" -name "*.ko" -exec ${CROSS_COMPILE}strip --strip-unneeded {} \; 2>/dev/null || true
-        
-        success "Modules built and installed to ${MODULES_DIR}"
+
+        # Confirm the integrate-modules design is intact (no loadable modules).
+        if grep -q '^CONFIG_INTEGRATE_MODULES=y' "${BUILD_DIR}/.config"; then
+            log "CONFIG_INTEGRATE_MODULES=y: all =m drivers are built into the Image."
+            log "No separate .ko modules to build or install (by design)."
+            success "Modules handled via INTEGRATE_MODULES (built-in)"
+        else
+            warn "CONFIG_INTEGRATE_MODULES not set; skipping module build."
+            warn "If you expected loadable modules, check zuma_defconfig."
+        fi
     fi
 }
 
@@ -279,10 +303,8 @@ create_flashable_zip() {
         fi
         
         # Copy modules
-        if [[ -d "${MODULES_DIR}" ]]; then
-            mkdir -p "${ANYKERNEL_DIR}/modules"
-            cp -r "${MODULES_DIR}/lib/modules"/* "${ANYKERNEL_DIR}/modules/" 2>/dev/null || true
-        fi
+        # NOTE: With CONFIG_INTEGRATE_MODULES=y there are no .ko files; all
+        # drivers are built into the Image. Leave the modules dir absent.
         
         # Update anykernel.sh with our properties
         cat > "${ANYKERNEL_DIR}/anykernel.sh" << 'EOF'
@@ -290,7 +312,7 @@ create_flashable_zip() {
 properties() {
     kernel.string=Tensor G3 KernelSU Next by @yourusername
     do.devicecheck=1
-    do.modules=1
+    do.modules=0
     do.cleanup=1
     do.cleanuponabort=1
     device.name1=zuma
@@ -308,16 +330,6 @@ properties() {
 # Kernel install
 dump_boot
 write_boot
-
-# Install modules
-if [ "$do.modules" == 1 ]; then
-    for module in modules/*; do
-        if [ -f "$module" ]; then
-            ui_print "Installing $(basename $module)..."
-            cp -f "$module" "$ramdisk/lib/modules/"
-        fi
-    done
-fi
 EOF
         
         # Create flashable zip

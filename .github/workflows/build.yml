@@ -154,13 +154,16 @@ jobs:
           # `ifdef config-build` branch (line 717) which never reaches 832/853.
           make O= may-sync-config= zuma_defconfig
 
-          # MODULES must be enabled here, BEFORE olddefconfig. zuma_defconfig
-          # has no CONFIG_MODULES entry and the symbol has no `default y`, so
-          # Kconfig leaves it off; with it off, olddefconfig silently clamps
-          # every tristate `=m` (BT, TIPC, ZRAM_GS, all the Google/Samsung
-          # modules) up to `=y`. Setting it first restores the real config.
+          # NOTE: CONFIG_MODULES is DELIBERATELY disabled in this kernel.
+          # zuma_defconfig sets CONFIG_INTEGRATE_MODULES=y, and kernel/module/Kconfig
+          # defines MODULES with `depends on !INTEGRATE_MODULES`. With
+          # INTEGRATE_MODULES=y, scripts/Makefile.lib:20-23 does:
+          #     obj-y += $(filter-out %/modules.order, $(obj-m))
+          # so ALL `=m` drivers (BT, WiFi, GPU, ZRAM, Samsung/Exynos, ...) are
+          # compiled straight into vmlinux/Image as built-in. There are no .ko
+          # files, and `make modules` hard-fails (Makefile:2047-2053). Do NOT
+          # enable MODULES here -- olddefconfig will (correctly) clamp it off.
           ./scripts/config --file .config \
-            --enable MODULES \
             --enable KSU --enable KPROBES --enable EXT4_FS \
             --enable BLUETOOTH_POWERSAVE_EXCLUDE --enable WIFI_POWERSAVE_EXCLUDE \
             --enable DEBUG_REBOOT --set-str LOCALVERSION "-kernelsu-next"
@@ -168,13 +171,18 @@ jobs:
           # Finalize config (resolves all deps and defaults).
           make O= may-sync-config= olddefconfig
 
-          # Fail fast if modules did not survive dependency resolution.
-          if ! grep -q '^CONFIG_MODULES=y' .config; then
-            echo "::error::CONFIG_MODULES is not enabled; 'make modules' cannot work"
+          # Sanity: the integrate-modules design must be intact, and our own
+          # options must have survived dependency resolution.
+          if ! grep -q '^CONFIG_INTEGRATE_MODULES=y' .config; then
+            echo "::error::CONFIG_INTEGRATE_MODULES lost; =m drivers would NOT be built-in"
             exit 1
           fi
-          echo "=== Module count (=m symbols) ==="
-          grep -c '=m$' .config
+          if ! grep -q '^CONFIG_KSU=y' .config; then
+            echo "::error::CONFIG_KSU did not survive olddefconfig"
+            exit 1
+          fi
+          echo "=== =m symbols (built-in via INTEGRATE_MODULES, informational) ==="
+          grep -c '=m$' .config || true
 
           # Generate auto.conf / auto.conf.cmd / autoconf.h. This MUST go
           # through make rather than invoking `conf` directly: Kconfig.include
@@ -202,14 +210,16 @@ jobs:
 
           echo "=== Building kernel (in-tree) ==="
 
+          # ONLY Image + dtbs. `modules` is a hard-error target under
+          # CONFIG_MODULES=n (Makefile:2047-2053) and would abort the build.
+          # All =m drivers are already folded into the Image by INTEGRATE_MODULES.
           make O= may-sync-config= -j"$(nproc)" \
             LLVM=1 LLVM_IAS=1 \
-            Image dtbs modules
+            Image dtbs
 
           echo "=== Build outputs ==="
           ls -la arch/arm64/boot/Image
-
-          make O= INSTALL_MOD_PATH="/tmp/modules" modules_install
+          ls -la arch/arm64/boot/dts/google/*.dtb 2>/dev/null || true
 
           # Copy artifacts
           mkdir -p "${DIST_DIR}"
@@ -228,16 +238,15 @@ jobs:
           cp arch/arm64/boot/Image "${AK3_DIR}/"
           mkdir -p "${AK3_DIR}/dtb"
           cp arch/arm64/boot/dts/google/*.dtb "${AK3_DIR}/dtb/" 2>/dev/null || true
-          mkdir -p "${AK3_DIR}/modules"
-          if [ -d "/tmp/modules" ]; then
-            find /tmp/modules -name "*.ko" -exec cp {} "${AK3_DIR}/modules/" \; 2>/dev/null || true
-          fi
+          # INTEGRATE_MODULES=y means ALL drivers (=m symbols) are compiled
+          # straight into the Image; there are no loadable .ko modules to ship.
+          # Leave the modules dir empty and let AK3 skip module handling.
 
           cat > "${AK3_DIR}/anykernel.sh" << 'AKEOF'
           properties() {
             kernel.string=Tensor G3 KernelSU Next
             do.devicecheck=1
-            do.modules=1
+            do.modules=0
             do.cleanup=1
             do.cleanuponabort=1
             device.name1=zuma
