@@ -154,15 +154,20 @@ jobs:
           # Finalize config (resolves all deps and defaults).
           make O= olddefconfig
 
-          # Run syncconfig ONCE to generate auto.conf/cmd and autoconf.h.
-          make O= syncconfig
+          # Generate auto.conf/auto.conf.cmd/autoconf.h DIRECTLY via the kconfig
+          # conf tool. Running `make syncconfig` triggers a bootstrap loop: the
+          # top Makefile `include`s auto.conf.cmd, and GNU make remakes included
+          # makefiles, whose rule re-invokes syncconfig -> infinite. Calling the
+          # conf binary directly bypasses make completely.
+          mkdir -p include/config include/generated
+          ./scripts/kconfig/conf --syncconfig Kconfig
 
-          # Break the SYNC/GEN infinite loop: the kconfig syncconfig recipe
-          # rewrites .config, leaving .config newer than auto.conf.cmd so the
-          # Makefile pattern rule (line 853) re-fires forever. Force the
-          # generated files strictly newer than .config so the rule stays quiet.
-          touch include/config/auto.conf.cmd include/config/auto.conf include/generated/autoconf.h
-          [ -f include/generated/rustc_cfg ] && touch include/generated/rustc_cfg || true
+          # Make .config OLDER than the generated files so the build's pattern
+          # rule `%/config/auto.conf.cmd: $(KCONFIG_CONFIG)` can never fire
+          # (auto.conf.cmd is newer than .config). This permanently prevents the
+          # SYNC loop. The build reads config via auto.conf/autoconf.h contents,
+          # not .config's mtime, so compilation is unaffected.
+          touch -d "2000-01-01 00:00:00 UTC" .config
 
           ls -la .config
 
