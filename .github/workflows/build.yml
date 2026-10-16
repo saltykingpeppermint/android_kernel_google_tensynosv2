@@ -93,39 +93,36 @@ jobs:
 
           BUILD_DIR="/tmp/kernel_build"
 
-          # Surface the real compiler/make error as a GitHub annotation.
+          # Surface the real build failure as a GitHub annotation.
           # The bare "Process completed with exit code 2" is uninformative;
           # this extracts the actual failure lines from the build log so we
           # don't have to iterate blind.
           #
-          # Matching is case-INSENSITIVE on purpose: scripts/gen_autoksyms.sh
-          # prints "ERROR: '<path>' whitelist file not found", and a
-          # case-sensitive "error:" pattern silently produced zero annotations,
-          # leaving the failure completely undiagnosable. If nothing matches
-          # at all, fall back to dumping the raw log tail so we are never
-          # blind again. GitHub allows ~10 error annotations per check, so
-          # budget 8 for our lines.
+          # Everything goes into ONE annotation on purpose. GitHub allows only
+          # ~10 error annotations per check, and an earlier version that emitted
+          # one annotation per matching line had all 10 slots eaten by harmless
+          # bpf_doc.py SyntaxWarnings, crowding the real error out entirely.
+          # A single packed annotation cannot be crowded out.
+          #
+          # Only HARD errors are matched (case-INSENSITIVE, because
+          # scripts/gen_autoksyms.sh prints "ERROR: '<path>' whitelist file not
+          # found" and a case-sensitive "error:" pattern produced zero
+          # annotations). Warnings are filtered out; if nothing hard matches we
+          # fall back to the raw tail so we are never blind again.
           BUILD_LOG="/tmp/kernel_build.log"
-          emit_log_lines() {
-            head -n 8 "${1}" 2>/dev/null \
-              | while IFS= read -r ln; do
-                  echo "::error::${ln}"
-                done
-          }
           on_err() {
             rc=$?
             echo "::group::Build log tail (rc=${rc})"
-            tail -n 200 "${BUILD_LOG}" 2>/dev/null || true
+            tail -n 300 "${BUILD_LOG}" 2>/dev/null || true
             echo "::endgroup::"
-            grep -niE "error:|error |warning:|undefined reference|No rule to make target|not found|cannot |failed" \
-                 "${BUILD_LOG}" 2>/dev/null > /tmp/kernel_build.hits || true
-            if [ -s /tmp/kernel_build.hits ]; then
-              emit_log_lines /tmp/kernel_build.hits
-            else
-              echo "::warning::No pattern matched; dumping raw log tail as annotations"
-              tail -n 8 "${BUILD_LOG}" 2>/dev/null > /tmp/kernel_build.tail || true
-              emit_log_lines /tmp/kernel_build.tail
+            hits=$(grep -niE "error:|error [0-9]+|undefined reference|No rule to make target|Traceback|fatal|Killed|make.*\*\*\*|command not found|cannot (find|open|access)" \
+                     "${BUILD_LOG}" 2>/dev/null \
+                   | grep -viE "syntaxwarning|deprecat" \
+                   | head -n 15 | tr '\n' '|')
+            if [ -z "${hits}" ]; then
+              hits="(no hard-error pattern matched) tail: $(tail -n 6 "${BUILD_LOG}" 2>/dev/null | tr '\n' '|')"
             fi
+            echo "::error::BUILD FAILED (rc=${rc}) :: ${hits}"
             exit "${rc}"
           }
           trap on_err ERR
