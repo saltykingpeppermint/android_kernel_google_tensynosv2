@@ -144,18 +144,25 @@ jobs:
 
           echo "=== Generating .config (in-tree) ==="
 
-          make O= zuma_defconfig \
-            KSU=y KPROBES=y EXT4_FS=y \
-            BLUETOOTH_POWERSAVE_EXCLUDE=y WIFI_POWERSAVE_EXCLUDE=y \
-            DEBUG_REBOOT=y LOCALVERSION="-kernelsu-next"
+          make O= zuma_defconfig
 
           ./scripts/config --file .config \
             --enable KSU --enable KPROBES --enable EXT4_FS \
             --enable BLUETOOTH_POWERSAVE_EXCLUDE --enable WIFI_POWERSAVE_EXCLUDE \
             --enable DEBUG_REBOOT --set-str LOCALVERSION "-kernelsu-next"
 
-          # Finalize config. NO syncconfig (that causes the recursion loop).
+          # Finalize config (resolves all deps and defaults).
           make O= olddefconfig
+
+          # Run syncconfig ONCE to generate auto.conf/cmd and autoconf.h.
+          make O= syncconfig
+
+          # Break the SYNC/GEN infinite loop: the kconfig syncconfig recipe
+          # rewrites .config, leaving .config newer than auto.conf.cmd so the
+          # Makefile pattern rule (line 853) re-fires forever. Force the
+          # generated files strictly newer than .config so the rule stays quiet.
+          touch include/config/auto.conf.cmd include/config/auto.conf include/generated/autoconf.h
+          [ -f include/generated/rustc_cfg ] && touch include/generated/rustc_cfg || true
 
           ls -la .config
 
