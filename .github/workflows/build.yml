@@ -63,7 +63,7 @@ jobs:
           path: ${{ env.KERNEL_SRC_DIR }}/kernelsu-next
           submodules: true
 
-      - name: Build kernel (single isolated script)
+      - name: Build kernel (single script, frozen config, no config loop)
         run: |
           cat > /tmp/build_kernel.sh << 'SCRIPTEOF'
           #!/bin/bash
@@ -132,7 +132,7 @@ jobs:
           OUT_DIR="/tmp/kernel_out"
           mkdir -p "${OUT_DIR}"
           
-          echo "=== Generating complete .config (definitive config) ==="
+          echo "=== Generating complete .config (definitive frozen config) ==="
           
           # Generate complete .config in ONE GO - no intermediate steps
           make KBUILD_OUTPUT="${OUT_DIR}" O="${OUT_DIR}" mrproper 2>/dev/null || true
@@ -155,12 +155,16 @@ jobs:
           # Verify config exists
           ls -la "${OUT_DIR}/.config"
           
-          echo "=== Building kernel (single make call, no config changes) ==="
+          # Copy frozen config to source tree (for build with O=out)
+          cp "${OUT_DIR}/.config" "${BUILD_DIR}/.config"
           
-          # Build with explicit env vars and single make call
+          echo "=== Building kernel (single make call, frozen config, no config changes) ==="
+          
+          # Build with explicit env vars - KCONFIG_CONFIG points to frozen config
           export KCONFIG_NOTIMESTAMP=1
           export KBUILD_OUTPUT="${OUT_DIR}"
           export O="${OUT_DIR}"
+          export KCONFIG_CONFIG="${OUT_DIR}/.config"
           
           # Run make from source directory with explicit output dir
           cd "${BUILD_DIR}"
@@ -168,6 +172,7 @@ jobs:
             LLVM=1 LLVM_IAS=1 CLANG_TRIPLE=aarch64-linux-gnu- \
             KBUILD_OUTPUT="${OUT_DIR}" O="${OUT_DIR}" \
             KCONFIG_NOTIMESTAMP=1 \
+            KCONFIG_CONFIG="${OUT_DIR}/.config" \
             Image dtbs modules
           
           # Verify outputs
@@ -229,7 +234,7 @@ jobs:
         run: |
           sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
 
-      - name: Build kernel (single script, no config loop)
+      - name: Build kernel (single script, frozen config, no config loop)
         run: |
           /tmp/build_kernel.sh "${KERNEL_SRC_DIR}" "${DIST_DIR}" "${{ matrix.build_type }}"
 
