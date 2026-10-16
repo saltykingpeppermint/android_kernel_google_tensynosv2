@@ -144,7 +144,15 @@ jobs:
 
           echo "=== Generating .config (in-tree) ==="
 
-          make O= zuma_defconfig
+          # `may-sync-config=` passed on the command line OVERRIDES the
+          # Makefile's own `may-sync-config := 1` (lines 330/347/352 are plain
+          # `:=`, not `override`), so `ifdef may-sync-config` (line 828) is
+          # false. That deletes BOTH the `include include/config/auto.conf.cmd`
+          # (line 832) and the multi-target SYNC pattern rule (line 853) -- the
+          # only rule that re-invokes `$(MAKE) syncconfig` and can recurse
+          # forever. Config goals are unaffected: they take the
+          # `ifdef config-build` branch (line 717) which never reaches 832/853.
+          make O= may-sync-config= zuma_defconfig
 
           ./scripts/config --file .config \
             --enable KSU --enable KPROBES --enable EXT4_FS \
@@ -152,28 +160,35 @@ jobs:
             --enable DEBUG_REBOOT --set-str LOCALVERSION "-kernelsu-next"
 
           # Finalize config (resolves all deps and defaults).
-          make O= olddefconfig
+          make O= may-sync-config= olddefconfig
 
-          # Generate auto.conf/auto.conf.cmd/autoconf.h DIRECTLY via the kconfig
-          # conf tool. Running `make syncconfig` triggers a bootstrap loop: the
-          # top Makefile `include`s auto.conf.cmd, and GNU make remakes included
-          # makefiles, whose rule re-invokes syncconfig -> infinite. Calling the
-          # conf binary directly bypasses make completely.
+          # Generate auto.conf / auto.conf.cmd / autoconf.h. This MUST go
+          # through make rather than invoking `conf` directly: Kconfig.include
+          # runs `$(srctree)/scripts/cc-version.sh`, and `srctree` is only in
+          # the environment because the Makefile exports it (line 300).
+          # `syncconfig` maps 1:1 onto `conf --syncconfig` via simple-targets.
           mkdir -p include/config include/generated
-          ./scripts/kconfig/conf --syncconfig Kconfig
+          make O= may-sync-config= syncconfig
 
-          # Make .config OLDER than the generated files so the build's pattern
-          # rule `%/config/auto.conf.cmd: $(KCONFIG_CONFIG)` can never fire
-          # (auto.conf.cmd is newer than .config). This permanently prevents the
-          # SYNC loop. The build reads config via auto.conf/autoconf.h contents,
-          # not .config's mtime, so compilation is unaffected.
+          # Fail fast with an actionable message if any config header is absent.
+          for f in .config include/config/auto.conf include/config/auto.conf.cmd \
+                   include/generated/autoconf.h; do
+            if [ ! -s "$f" ]; then
+              echo "::error::Missing or empty $f after syncconfig"
+              exit 1
+            fi
+          done
+
+          # Belt and suspenders: keep .config older than the generated files so
+          # nothing can consider them out of date. The build reads configuration
+          # from auto.conf/autoconf.h contents, never from .config's mtime.
           touch -d "2000-01-01 00:00:00 UTC" .config
 
-          ls -la .config
+          ls -la .config include/config/ include/generated/autoconf.h
 
           echo "=== Building kernel (in-tree) ==="
 
-          make O= -j"$(nproc)" \
+          make O= may-sync-config= -j"$(nproc)" \
             LLVM=1 LLVM_IAS=1 \
             Image dtbs modules
 
