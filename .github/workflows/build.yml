@@ -175,6 +175,46 @@ jobs:
           mkdir -p kernel
           cp "${OUR_REPO_DIR}/kernel/reboot.c" kernel/reboot.c
 
+          # Drop orphaned vendor-hook exports.
+          #
+          # Upstream 16.0.0-sultan has a latent one-line bug: kernel/sched/
+          # vendor_hooks.c exports 109 tracepoints while include/trace/hooks/
+          # sched.h only declares 108. The extra one,
+          # android_rvh_effective_cpu_util, is never declared, so
+          # EXPORT_TRACEPOINT_SYMBOL_GPL() expands into references to the
+          # nonexistent __tracepoint_/__traceiter_ symbols and clang fails
+          # with "use of undeclared identifier".
+          #
+          # It survives upstream because their config keeps
+          # CONFIG_TRIM_UNUSED_KSYMS=y, under which the export macro emits only
+          # a __ksymtab_strings entry and never references the symbol at
+          # compile time. We turn trimming off (the whitelist it needs is a
+          # Google-internal Bazel path that does not exist here), which
+          # exposes the bug.
+          #
+          # Nothing calls this tracepoint anywhere in the tree -- fair.c only
+          # uses an unrelated function also named effective_cpu_util() -- so
+          # dropping the dead export is safe. Do it generically so it keeps
+          # working if upstream adds or removes more hooks.
+          if [ -d include/trace/hooks ]; then
+            grep -rhoE 'DECLARE_(RESTRICTED_)?HOOK\(\s*[a-z0-9_]+' include/trace/hooks/ 2>/dev/null \
+              | grep -oE '[a-z0-9_]+$' | sort -u > /tmp/hook_declared.txt
+            grep -oE 'EXPORT_TRACEPOINT_SYMBOL_GPL\(\s*android_r?vh_[a-z0-9_]+' kernel/sched/vendor_hooks.c 2>/dev/null \
+              | grep -oE 'android_r?vh_[a-z0-9_]+$' | sort -u > /tmp/hook_exported.txt
+            comm -13 /tmp/hook_declared.txt /tmp/hook_exported.txt > /tmp/hook_orphans.txt
+            if [ -s /tmp/hook_orphans.txt ]; then
+              echo "=== Removing orphaned vendor-hook exports ==="
+              cat /tmp/hook_orphans.txt
+              while IFS= read -r orphan; do
+                [ -z "${orphan}" ] && continue
+                sed -i "s|EXPORT_TRACEPOINT_SYMBOL_GPL(${orphan});|/* orphan export removed: ${orphan} is never declared */|" \
+                     kernel/sched/vendor_hooks.c
+              done < /tmp/hook_orphans.txt
+            else
+              echo "=== No orphaned vendor-hook exports found ==="
+            fi
+          fi
+
           # Apply build configs
           if [ "${ENABLE_KSU}" = "true" ]; then
             if ! grep -q "CONFIG_KSU=y" build.config.common; then

@@ -189,6 +189,31 @@ configure_kernel() {
     
     cd "${KERNEL_DIR}"
     
+    # Drop orphaned vendor-hook exports.
+    #
+    # Upstream 16.0.0-sultan ships kernel/sched/vendor_hooks.c exporting 109
+    # tracepoints while include/trace/hooks/sched.h only declares 108. The
+    # extra one, android_rvh_effective_cpu_util, is never declared, so it
+    # expands into references to nonexistent __tracepoint_/__traceiter_
+    # symbols and clang fails with "use of undeclared identifier". Upstream
+    # hides this by keeping CONFIG_TRIM_UNUSED_KSYMS=y, under which the export
+    # macro never references the symbol at compile time; we disable trimming,
+    # which exposes it. Nothing in the tree calls the hook, so removing the
+    # dead export is safe. Done generically so it tracks future hook changes.
+    if [ -d "${KERNEL_DIR}/include/trace/hooks" ]; then
+        grep -rhoE 'DECLARE_(RESTRICTED_)?HOOK\(\s*[a-z0-9_]+' "${KERNEL_DIR}/include/trace/hooks/" 2>/dev/null \
+            | grep -oE '[a-z0-9_]+$' | sort -u > /tmp/hook_declared.txt
+        grep -oE 'EXPORT_TRACEPOINT_SYMBOL_GPL\(\s*android_r?vh_[a-z0-9_]+' "${KERNEL_DIR}/kernel/sched/vendor_hooks.c" 2>/dev/null \
+            | grep -oE 'android_r?vh_[a-z0-9_]+$' | sort -u > /tmp/hook_exported.txt
+        comm -13 /tmp/hook_declared.txt /tmp/hook_exported.txt > /tmp/hook_orphans.txt
+        while IFS= read -r orphan; do
+            [ -z "${orphan}" ] && continue
+            warn "Removing orphaned vendor-hook export: ${orphan}"
+            sed -i "s|EXPORT_TRACEPOINT_SYMBOL_GPL(${orphan});|/* orphan export removed: ${orphan} is never declared */|" \
+                 "${KERNEL_DIR}/kernel/sched/vendor_hooks.c"
+        done < /tmp/hook_orphans.txt
+    fi
+
     make O="${BUILD_DIR}" "${DEFCONFIG}"
 
     # Layer the Tensor G3 device drivers onto the generic GKI defconfig. The
