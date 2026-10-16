@@ -135,6 +135,10 @@ jobs:
              google-modules/wlan/bcm4389/Kbuild
           cp "${OUR_REPO_DIR}/google-modules/power/reset/pixel-zuma-reboot.c" \
              google-modules/power/reset/pixel-zuma-reboot.c
+          # Restart-retry logic lives in kernel/reboot.c's kernel_restart();
+          # overlay our patched copy over the freshly-cloned upstream source.
+          mkdir -p kernel
+          cp "${OUR_REPO_DIR}/kernel/reboot.c" kernel/reboot.c
 
           # Apply build configs
           if [ "${ENABLE_KSU}" = "true" ]; then

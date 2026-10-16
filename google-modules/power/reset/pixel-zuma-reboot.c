@@ -17,24 +17,16 @@
 #include <linux/mfd/syscon.h>
 #include <linux/platform_device.h>
 #include <linux/reboot.h>
-#include <linux/atomic.h>
 #include <soc/google/exynos-el3_mon.h>
 #include "../../bms/google_bms.h"
-
-extern void (*arm_pm_restart)(enum reboot_mode, const char *);
 
 #define EXYNOS_PMU_SYSIP_DAT0		(0x0810)
 
 #define BMS_RSBM_VALID			BIT(31)
 
-/* Restart retry configuration */
-#define MAX_RESTART_RETRIES		10
-#define RESTART_RETRY_DELAY_MS	1000
-
 static u32 reboot_cmd_offset;
 static phys_addr_t pmu_alive_base;
 static bool force_warm_reboot_on_thermal_shutdown;
-static atomic_t restart_retry_count;
 
 enum pon_reboot_mode {
 	REBOOT_MODE_NORMAL		= 0x00,
@@ -131,31 +123,17 @@ static struct notifier_block pixel_reboot_nb = {
 
 static int pixel_restart_handler(struct notifier_block *this, unsigned long mode, void *cmd)
 {
-	int retry;
-
-	pr_info("ready to do restart (max %d retries).\n", MAX_RESTART_RETRIES);
-
-	/* Try to restart with retries */
-	for (retry = 0; retry < MAX_RESTART_RETRIES; retry++) {
-		atomic_set(&restart_retry_count, retry + 1);
-		pr_info("Restart attempt %d of %d\n", retry + 1, MAX_RESTART_RETRIES);
-
-		/* Call the architecture-specific restart handler */
-		if (arm_pm_restart)
-			arm_pm_restart(mode, cmd);
-		else if (pm_power_off)
-			pm_power_off();
-
-		/* If we reach here, restart failed, wait before retrying */
-		pr_err("Restart attempt %d failed, retrying in %d ms...\n",
-		       retry + 1, RESTART_RETRY_DELAY_MS);
-		mdelay(RESTART_RETRY_DELAY_MS);
-	}
-
-	/* All retries exhausted */
-	pr_emerg("All %d restart attempts failed! System may be in unstable state.\n",
-		 MAX_RESTART_RETRIES);
-	atomic_set(&restart_retry_count, 0);
+	/*
+	 * zuma's pixel-reboot DT node only exposes a PON "reboot reason"
+	 * mailbox (reboot-cmd-offset). There is no PS_HOLD or swreset
+	 * register we can drive from here, so this handler is a stub on
+	 * purpose: the actual reset is performed by the PON hardware once
+	 * the restart path falls through to machine_restart().
+	 *
+	 * Restart retries are implemented in kernel_restart()
+	 * (kernel/reboot.c), which owns the real retryable fallback.
+	 */
+	pr_info("ready to do restart.\n");
 
 	return NOTIFY_DONE;
 }
@@ -201,9 +179,6 @@ static int pixel_reboot_probe(struct platform_device *pdev)
 	force_warm_reboot_on_thermal_shutdown = of_property_read_bool(np,
 						"force-warm-reboot-on-thermal-shutdown");
 
-	/* Initialize restart retry counter */
-	atomic_set(&restart_retry_count, 0);
-
 	err = register_reboot_notifier(&pixel_reboot_nb);
 	if (err) {
 		dev_err(dev, "cannot register reboot handler (err=%d)\n", err);
@@ -217,7 +192,7 @@ static int pixel_reboot_probe(struct platform_device *pdev)
 		return err;
 	}
 
-	dev_info(dev, "register restart handler successfully (max %d retries)\n", MAX_RESTART_RETRIES);
+	dev_info(dev, "register restart handler successfully\n");
 
 	return 0;
 }
