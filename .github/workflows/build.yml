@@ -1,4 +1,4 @@
-name: Build Tensor G3 Kernel with KernelSU Next
+name: Build Tensor G3 Kernel (zuma)
 
 on:
   push:
@@ -26,6 +26,13 @@ env:
   KERNEL_SRC_DIR: ${{ github.workspace }}/kernel_source
   DIST_DIR: ${{ github.workspace }}/dist
   OUR_REPO_DIR: ${{ github.workspace }}/our_modifications
+  # KernelSU Next requires CONFIG_KPROBES, and arch/Kconfig declares KPROBES
+  # with `depends on MODULES`. This kernel's zuma_defconfig sets
+  # CONFIG_INTEGRATE_MODULES=y, which forces MODULES=n (kernel/module/Kconfig),
+  # so CONFIG_KSU is pruned by olddefconfig. Until that is resolved, KernelSU
+  # is disabled so the workflow ships a kernel that is guaranteed to boot.
+  # Flip this to 'true' once the KPROBES/MODULES conflict is resolved.
+  ENABLE_KSU: false
 
 jobs:
   build:
@@ -56,6 +63,7 @@ jobs:
             ${{ env.KERNEL_SRC_DIR }}
 
       - name: Checkout KernelSU Next
+        if: env.ENABLE_KSU == 'true'
         uses: actions/checkout@v4.2.2
         with:
           repository: KernelSU-Next/KernelSU-Next
@@ -99,16 +107,19 @@ jobs:
           rm -rf arch/arm64/include/generated
           rm -f Module.symvers modules.builtin modules.order
 
-          # Apply KernelSU Next Kconfig source into main Kconfig
-          if ! grep -q "kernelsu-next/kernel/Kconfig" Kconfig; then
-            if grep -q 'source "security/Kconfig"' Kconfig; then
-              sed -i '/source "security\/Kconfig"/a source "kernelsu-next\/kernel\/Kconfig"' Kconfig
-            elif grep -q 'source "crypto/Kconfig"' Kconfig; then
-              sed -i '/source "crypto\/Kconfig"/i source "kernelsu-next\/kernel\/Kconfig"' Kconfig
-            elif grep -q 'source "lib/Kconfig"' Kconfig; then
-              sed -i '/source "lib\/Kconfig"/i source "kernelsu-next\/kernel\/Kconfig"' Kconfig
-            else
-              echo 'source "kernelsu-next/kernel/Kconfig"' >> Kconfig
+          # Apply KernelSU Next Kconfig source into main Kconfig.
+          # Skipped when KernelSU is disabled -- see ENABLE_KSU above.
+          if [ "${ENABLE_KSU}" = "true" ]; then
+            if ! grep -q "kernelsu-next/kernel/Kconfig" Kconfig; then
+              if grep -q 'source "security/Kconfig"' Kconfig; then
+                sed -i '/source "security\/Kconfig"/a source "kernelsu-next\/kernel\/Kconfig"' Kconfig
+              elif grep -q 'source "crypto/Kconfig"' Kconfig; then
+                sed -i '/source "crypto\/Kconfig"/i source "kernelsu-next\/kernel\/Kconfig"' Kconfig
+              elif grep -q 'source "lib/Kconfig"' Kconfig; then
+                sed -i '/source "lib\/Kconfig"/i source "kernelsu-next\/kernel\/Kconfig"' Kconfig
+              else
+                echo 'source "kernelsu-next/kernel/Kconfig"' >> Kconfig
+              fi
             fi
           fi
 
@@ -126,8 +137,13 @@ jobs:
              google-modules/power/reset/pixel-zuma-reboot.c
 
           # Apply build configs
-          if ! grep -q "CONFIG_KSU=y" build.config.common; then
-            printf '\nCONFIG_KSU=y\nCONFIG_KPROBES=y\nCONFIG_EXT4_FS=y\nCONFIG_BLUETOOTH_POWERSAVE_EXCLUDE=y\nCONFIG_WIFI_POWERSAVE_EXCLUDE=y\n' >> build.config.common
+          if [ "${ENABLE_KSU}" = "true" ]; then
+            if ! grep -q "CONFIG_KSU=y" build.config.common; then
+              printf '\nCONFIG_KSU=y\nCONFIG_KPROBES=y\nCONFIG_EXT4_FS=y\n' >> build.config.common
+            fi
+          fi
+          if ! grep -q "CONFIG_BLUETOOTH_POWERSAVE_EXCLUDE=y" build.config.common; then
+            printf '\nCONFIG_BLUETOOTH_POWERSAVE_EXCLUDE=y\nCONFIG_WIFI_POWERSAVE_EXCLUDE=y\n' >> build.config.common
           fi
 
           # Setup environment. O= (empty) overrides KBUILD_OUTPUT?=out -> in-tree build.
@@ -164,9 +180,11 @@ jobs:
           # files, and `make modules` hard-fails (Makefile:2047-2053). Do NOT
           # enable MODULES here -- olddefconfig will (correctly) clamp it off.
           ./scripts/config --file .config \
-            --enable KSU --enable KPROBES --enable EXT4_FS \
             --enable BLUETOOTH_POWERSAVE_EXCLUDE --enable WIFI_POWERSAVE_EXCLUDE \
             --enable DEBUG_REBOOT --set-str LOCALVERSION "-kernelsu-next"
+          if [ "${ENABLE_KSU}" = "true" ]; then
+            ./scripts/config --file .config --enable KSU --enable KPROBES --enable EXT4_FS
+          fi
 
           # Finalize config (resolves all deps and defaults).
           make O= may-sync-config= olddefconfig
@@ -177,9 +195,11 @@ jobs:
             echo "::error::CONFIG_INTEGRATE_MODULES lost; =m drivers would NOT be built-in"
             exit 1
           fi
-          if ! grep -q '^CONFIG_KSU=y' .config; then
-            echo "::error::CONFIG_KSU did not survive olddefconfig"
-            exit 1
+          if [ "${ENABLE_KSU}" = "true" ]; then
+            if ! grep -q '^CONFIG_KSU=y' .config; then
+              echo "::error::CONFIG_KSU did not survive olddefconfig"
+              exit 1
+            fi
           fi
           echo "=== =m symbols (built-in via INTEGRATE_MODULES, informational) ==="
           grep -c '=m$' .config || true
@@ -244,7 +264,7 @@ jobs:
 
           cat > "${AK3_DIR}/anykernel.sh" << 'AKEOF'
           properties() {
-            kernel.string=Tensor G3 KernelSU Next
+            kernel.string=Tensor G3 Kernel (zuma)
             do.devicecheck=1
             do.modules=0
             do.cleanup=1
@@ -262,7 +282,12 @@ jobs:
           AKEOF
 
           cd "${AK3_DIR}"
-          zip -r9 "${DIST_DIR}/KernelSU-Next-zuma-${{ matrix.build_type }}-${GITHUB_RUN_NUMBER}.zip" . -x ".git*" -x "README.md" -x "*.zip"
+          if [ "${ENABLE_KSU}" = "true" ]; then
+            AK3_ZIP="KernelSU-Next-zuma-${{ matrix.build_type }}-${GITHUB_RUN_NUMBER}.zip"
+          else
+            AK3_ZIP="TensorG3-kernel-zuma-${{ matrix.build_type }}-${GITHUB_RUN_NUMBER}.zip"
+          fi
+          zip -r9 "${DIST_DIR}/${AK3_ZIP}" . -x ".git*" -x "README.md" -x "*.zip"
 
           echo "=== Build completed successfully! ==="
 
