@@ -89,8 +89,28 @@ jobs:
       - name: Build kernel (in-tree, O= empty)
         run: |
           set -e
+          set -o pipefail
 
           BUILD_DIR="/tmp/kernel_build"
+
+          # Surface the real compiler/make error as a GitHub annotation.
+          # The bare "Process completed with exit code 2" is uninformative;
+          # this extracts the actual `error:` lines from the build log so we
+          # don't have to iterate blind.
+          BUILD_LOG="/tmp/kernel_build.log"
+          on_err() {
+            rc=$?
+            echo "::group::Build log tail (rc=${rc})"
+            tail -n 200 "${BUILD_LOG}" 2>/dev/null || true
+            echo "::endgroup::"
+            grep -nE "error:|Error [0-9]|undefined reference|No rule to make target" "${BUILD_LOG}" 2>/dev/null \
+              | head -n 10 \
+              | while IFS= read -r ln; do
+                  echo "::error file=kernel/reboot.c::${ln}"
+                done
+            exit "${rc}"
+          }
+          trap on_err ERR
 
           echo "=== Setting up isolated in-tree build ==="
           rm -rf "${BUILD_DIR}"
@@ -239,7 +259,7 @@ jobs:
           # All =m drivers are already folded into the Image by INTEGRATE_MODULES.
           make O= may-sync-config= -j"$(nproc)" \
             LLVM=1 LLVM_IAS=1 \
-            Image dtbs
+            Image dtbs 2>&1 | tee "${BUILD_LOG}"
 
           echo "=== Build outputs ==="
           ls -la arch/arm64/boot/Image
