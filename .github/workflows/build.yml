@@ -78,24 +78,23 @@ jobs:
           echo "/opt/llvm/bin" >> $GITHUB_PATH
           /opt/llvm/bin/clang --version
 
-      - name: Build kernel
+      - name: Build kernel (in-tree, O= empty)
         run: |
           set -e
 
           BUILD_DIR="/tmp/kernel_build"
-          OUT_DIR="/tmp/kernel_out"
 
-          echo "=== Setting up isolated build environment ==="
-          rm -rf "${BUILD_DIR}" "${OUT_DIR}"
-          mkdir -p "${BUILD_DIR}" "${OUT_DIR}"
+          echo "=== Setting up isolated in-tree build ==="
+          rm -rf "${BUILD_DIR}"
+          mkdir -p "${BUILD_DIR}"
 
-          # Copy kernel source to isolated build directory (no .git needed)
+          # Copy kernel source into isolated dir (this IS our build tree, in-tree)
           cp -r "${KERNEL_SRC_DIR}"/* "${BUILD_DIR}/"
           cp -r "${KERNEL_SRC_DIR}/kernelsu-next" "${BUILD_DIR}/kernelsu-next" 2>/dev/null || true
 
           cd "${BUILD_DIR}"
 
-          # Clean any build artifacts that could trip the "source tree not clean" check
+          # Clean any build artifacts
           rm -rf out .config .config.old include/config include/generated
           rm -rf arch/arm64/include/generated
           rm -f Module.symvers modules.builtin modules.order
@@ -131,7 +130,7 @@ jobs:
             printf '\nCONFIG_KSU=y\nCONFIG_KPROBES=y\nCONFIG_EXT4_FS=y\nCONFIG_BLUETOOTH_POWERSAVE_EXCLUDE=y\nCONFIG_WIFI_POWERSAVE_EXCLUDE=y\n' >> build.config.common
           fi
 
-          # Setup build environment
+          # Setup environment. O= (empty) overrides KBUILD_OUTPUT?=out -> in-tree build.
           export ARCH=arm64
           export SUBARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
@@ -141,67 +140,53 @@ jobs:
           export LLVM=1
           export LLVM_IAS=1
           export KCONFIG_NOTIMESTAMP=1
+          export KBUILD_OUTPUT=
 
-          echo "=== Generating frozen .config ==="
+          echo "=== Generating .config (in-tree) ==="
 
-          # Generate defconfig into OUT_DIR only (never touches source tree)
-          make O="${OUT_DIR}" zuma_defconfig \
+          make O= zuma_defconfig \
             KSU=y KPROBES=y EXT4_FS=y \
             BLUETOOTH_POWERSAVE_EXCLUDE=y WIFI_POWERSAVE_EXCLUDE=y \
             DEBUG_REBOOT=y LOCALVERSION="-kernelsu-next"
 
-          # Apply custom configs via scripts/config
-          ./scripts/config --file "${OUT_DIR}/.config" \
+          ./scripts/config --file .config \
             --enable KSU --enable KPROBES --enable EXT4_FS \
             --enable BLUETOOTH_POWERSAVE_EXCLUDE --enable WIFI_POWERSAVE_EXCLUDE \
             --enable DEBUG_REBOOT --set-str LOCALVERSION "-kernelsu-next"
 
-          # Finalize config
-          make O="${OUT_DIR}" olddefconfig
-          make O="${OUT_DIR}" syncconfig
+          # Finalize config. NO syncconfig (that causes the recursion loop).
+          make O= olddefconfig
 
-          # KEY FIX: force auto.conf/auto.conf.cmd to be NEWER than .config so the
-          # build step never re-triggers syncconfig (kills the GEN/SYNC loop)
-          touch "${OUT_DIR}/include/config/auto.conf"
-          touch "${OUT_DIR}/include/config/auto.conf.cmd"
+          ls -la .config
 
-          # Safety: make sure no .config leaked into the source tree
-          rm -f "${BUILD_DIR}/.config"
-          rm -rf "${BUILD_DIR}/out"
+          echo "=== Building kernel (in-tree) ==="
 
-          ls -la "${OUT_DIR}/.config"
-
-          echo "=== Building kernel ==="
-
-          # Single make call with O= only. No KBUILD_OUTPUT env, no KCONFIG_CONFIG.
-          make O="${OUT_DIR}" -j"$(nproc)" \
+          make O= -j"$(nproc)" \
             LLVM=1 LLVM_IAS=1 \
             Image dtbs modules
 
           echo "=== Build outputs ==="
-          ls -la "${OUT_DIR}/arch/arm64/boot/Image"
+          ls -la arch/arm64/boot/Image
 
-          # Install modules
-          make O="${OUT_DIR}" INSTALL_MOD_PATH="/tmp/modules" modules_install
+          make O= INSTALL_MOD_PATH="/tmp/modules" modules_install
 
           # Copy artifacts
           mkdir -p "${DIST_DIR}"
-          cp "${OUT_DIR}/arch/arm64/boot/Image" "${DIST_DIR}/Image-${{ matrix.build_type }}"
-          cp "${OUT_DIR}/.config" "${DIST_DIR}/config-${{ matrix.build_type }}"
-          cp "${OUT_DIR}/vmlinux" "${DIST_DIR}/vmlinux-${{ matrix.build_type }}" 2>/dev/null || true
+          cp arch/arm64/boot/Image "${DIST_DIR}/Image-${{ matrix.build_type }}"
+          cp .config "${DIST_DIR}/config-${{ matrix.build_type }}"
+          cp vmlinux "${DIST_DIR}/vmlinux-${{ matrix.build_type }}" 2>/dev/null || true
           mkdir -p "${DIST_DIR}/dtb"
-          cp "${OUT_DIR}/arch/arm64/boot/dts/google/"*.dtb "${DIST_DIR}/dtb/" 2>/dev/null || true
+          cp arch/arm64/boot/dts/google/*.dtb "${DIST_DIR}/dtb/" 2>/dev/null || true
 
-          # Create AnyKernel3 flashable zip
           echo "=== Creating AnyKernel3 flashable zip ==="
           AK3_DIR="/tmp/anykernel3"
           rm -rf "${AK3_DIR}"
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git "${AK3_DIR}"
           rm -f "${AK3_DIR}/Image" "${AK3_DIR}/dtb"
           rm -rf "${AK3_DIR}/modules"
-          cp "${OUT_DIR}/arch/arm64/boot/Image" "${AK3_DIR}/"
+          cp arch/arm64/boot/Image "${AK3_DIR}/"
           mkdir -p "${AK3_DIR}/dtb"
-          cp "${OUT_DIR}/arch/arm64/boot/dts/google/"*.dtb "${AK3_DIR}/dtb/" 2>/dev/null || true
+          cp arch/arm64/boot/dts/google/*.dtb "${AK3_DIR}/dtb/" 2>/dev/null || true
           mkdir -p "${AK3_DIR}/modules"
           if [ -d "/tmp/modules" ]; then
             find /tmp/modules -name "*.ko" -exec cp {} "${AK3_DIR}/modules/" \; 2>/dev/null || true
