@@ -330,37 +330,37 @@ jobs:
           echo "=== Staged ${KOCOUNT} .ko into ramdisk /lib/modules/${MODREL} ==="
 
           cat > "${AK3_DIR}/anykernel.sh" << 'AKEOF'
-### AnyKernel setup
-# global properties
-properties() {
-  kernel.string=Tensor G3 Kernel (zuma)
-  do.devicecheck=1
-  do.modules=0
-  do.cleanup=1
-  do.cleanuponabort=1
-  device.name1=zuma
-  device.name2=shusky
-  device.name3=husky
-  device.name4=akita
-  device.name5=tokay
-  supported.versions=-
-}
+          ### AnyKernel setup
+          # global properties
+          properties() {
+            kernel.string=Tensor G3 Kernel (zuma)
+            do.devicecheck=1
+            do.modules=0
+            do.cleanup=1
+            do.cleanuponabort=1
+            device.name1=zuma
+            device.name2=shusky
+            device.name3=husky
+            device.name4=akita
+            device.name5=tokay
+            supported.versions=-
+          }
 
-### AnyKernel install
-# boot shell variables
-BLOCK=boot;
-IS_SLOT_DEVICE=1;
-RAMDISK_COMPRESSION=auto;
-PATCH_VBMETA_FLAG=auto;
+          ### AnyKernel install
+          # boot shell variables
+          BLOCK=boot;
+          IS_SLOT_DEVICE=1;
+          RAMDISK_COMPRESSION=auto;
+          PATCH_VBMETA_FLAG=auto;
 
-# import functions/variables and setup patching - see for reference (DO NOT REMOVE)
-. tools/ak3-core.sh;
+          # import functions/variables and setup patching - see for reference (DO NOT REMOVE)
+          . tools/ak3-core.sh;
 
-# boot install
-dump_boot;
-write_boot;
-## end boot install
-AKEOF
+          # boot install
+          dump_boot;
+          write_boot;
+          ## end boot install
+          AKEOF
 
           cd "${AK3_DIR}"
           if [ "${ENABLE_KSU}" = "true" ]; then
