@@ -177,7 +177,10 @@ configure_kernel() {
     make O="${BUILD_DIR}" "${DEFCONFIG}"
     
     # Enable additional configs
+    # MODULES must come first: zuma_defconfig has no CONFIG_MODULES entry, and
+    # without it olddefconfig clamps every tristate `=m` up to `=y`.
     ./scripts/config --file "${BUILD_DIR}/.config" \
+        --enable MODULES \
         --enable KSU \
         --enable KPROBES \
         --enable EXT4_FS \
