@@ -38,8 +38,20 @@ jobs:
 
       - name: Check restart retry
         run: |
+          set -e
           echo "=== Restart retry mechanism ==="
-          grep -B2 -A5 "MAX_RESTART_RETRIES" google-modules/power/reset/pixel-zuma-reboot.c
+          # The retry lives in kernel_restart() in kernel/reboot.c, NOT in the
+          # Exynos reset driver. pixel-zuma-reboot.c is deliberately left as the
+          # unmodified upstream stub: putting the retry inside the driver only
+          # covers that one entry point, and a second loop there would fight the
+          # one in kernel_restart().
+          grep -n -B2 -A5 "MAX_RESTART_RETRIES" kernel/reboot.c
+          grep -n "RESTART_RETRY_DELAY_MS" kernel/reboot.c
+          if grep -q "MAX_RESTART_RETRIES" google-modules/power/reset/pixel-zuma-reboot.c; then
+            echo "::error::pixel-zuma-reboot.c re-implements the restart retry; it must stay the upstream stub"
+            exit 1
+          fi
+          echo "OK: retry loop is in kernel/reboot.c and only there"
 
       - name: Check build config
         run: |
@@ -51,4 +63,4 @@ jobs:
           echo "✅ All kernel modifications verified!"
           echo "📦 KernelSU Next: $(grep -c "config KSU" kernelsu-next/Kconfig) configs found"
           echo "🔋 Power save exclusions: Added"
-          echo "🔄 Restart retries: 10 attempts implemented"
+          echo "🔄 Restart retries: $(grep -oE 'MAX_RESTART_RETRIES[[:space:]]+[0-9]+' kernel/reboot.c | grep -oE '[0-9]+$') attempts implemented (kernel/reboot.c)"

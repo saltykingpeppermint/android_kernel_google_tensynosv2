@@ -115,9 +115,14 @@ jobs:
             echo "::group::Build log tail (rc=${rc})"
             tail -n 300 "${BUILD_LOG}" 2>/dev/null || true
             echo "::endgroup::"
-            hits=$(grep -niE "error:|error [0-9]+|undefined reference|No rule to make target|Traceback|fatal|Killed|make.*\*\*\*|command not found|cannot (find|open|access)" \
+            # Dedupe by leading file path (awk '!seen[$1]++' keeps only the
+            # first match per source file). Without this one broken file eats
+            # the entire annotation budget: run #106 emitted 14 identical
+            # mm/vmscan.c lines and told us nothing about any other file.
+            hits=$(grep -iE "error:|error [0-9]+|undefined reference|No rule to make target|Traceback|fatal|Killed|make.*\*\*\*|command not found|cannot (find|open|access)" \
                      "${BUILD_LOG}" 2>/dev/null \
                    | grep -viE "syntaxwarning|deprecat" \
+                   | awk -F: '!seen[$1]++' \
                    | head -n 15 | tr '\n' '|')
             if [ -z "${hits}" ]; then
               hits="(no hard-error pattern matched) tail: $(tail -n 6 "${BUILD_LOG}" 2>/dev/null | tr '\n' '|')"
@@ -214,6 +219,36 @@ jobs:
               echo "=== No orphaned vendor-hook exports found ==="
             fi
           fi
+
+          # Restore the missing shrinker_rwsem declaration.
+          #
+          # mm/vmscan.c calls down_write()/up_write()/up_read()/
+          # down_read_trylock()/rwsem_is_contended() on &shrinker_rwsem in 14
+          # places, every one of them guarded by CONFIG_MEMCG -- but nothing in
+          # the tree declares that symbol. include/linux/shrinker.h has no
+          # mention of it, and there is no DECLARE_RWSEM(shrinker_rwsem)
+          # anywhere, so mm/vmscan.o fails with "use of undeclared identifier
+          # 'shrinker_rwsem'" for any config with MEMCG=y, which every Pixel
+          # config has. Another lossy merge in 16.0.0-sultan.
+          #
+          # Config cannot work around this: CONFIG_SHRINKER_DEBUG, the only
+          # other candidate, is declared in lib/Kconfig.debug as
+          # `depends on NEVER`, so it is permanently unselectable.
+          #
+          # Mainline keeps this as a file-scope static beside its sibling
+          # shrinker locks, so restore exactly that. Every reference is inside
+          # mm/vmscan.c, so static is correct.
+          if grep -q 'DEFINE_RWLOCK(shrinker_rwlock)' mm/vmscan.c \
+             && ! grep -q 'DECLARE_RWSEM(shrinker_rwsem)' mm/vmscan.c; then
+            echo "=== Restoring missing DECLARE_RWSEM(shrinker_rwsem) in mm/vmscan.c ==="
+            awk '{print} /^static DEFINE_RWLOCK\(shrinker_rwlock\);$/ {print "#ifdef CONFIG_MEMCG"; print "static DECLARE_RWSEM(shrinker_rwsem);"; print "#endif"}' \
+                 mm/vmscan.c > mm/vmscan.c.tmp && mv mm/vmscan.c.tmp mm/vmscan.c
+          fi
+          if ! grep -q 'DECLARE_RWSEM(shrinker_rwsem)' mm/vmscan.c; then
+            echo "::error::mm/vmscan.c is missing DECLARE_RWSEM(shrinker_rwsem); vmscan.o cannot compile with MEMCG=y"
+            exit 1
+          fi
+          grep -n -B2 -A4 'DECLARE_RWSEM(shrinker_rwsem)' mm/vmscan.c
 
           # Apply build configs
           if [ "${ENABLE_KSU}" = "true" ]; then
@@ -367,7 +402,15 @@ jobs:
           # built into the Image. Build modules alongside Image/dtbs so the
           # .ko files exist to ship; AK3 installs them into the boot image's
           # ramdisk (/lib/modules) so they load on boot.
-          make O= may-sync-config= -j"$(nproc)" \
+          # -k (keep going) is TEMPORARY triage mode. 16.0.0-sultan has proven
+          # to be a lossy merge carrying several independent source bugs (an
+          # undeclared tracepoint export, a missing DECLARE_RWSEM), and
+          # stopping at the first failure costs one ~10 minute CI cycle per
+          # bug. Letting make carry on surfaces every broken translation unit
+          # in a single run. Set MAKE_KEEP_GOING back to "" once the tree
+          # compiles clean.
+          MAKE_KEEP_GOING="-k"
+          make O= may-sync-config= -j"$(nproc)" ${MAKE_KEEP_GOING} \
             LLVM=1 LLVM_IAS=1 \
             Image dtbs modules 2>&1 | tee "${BUILD_LOG}"
 

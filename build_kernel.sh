@@ -214,6 +214,30 @@ configure_kernel() {
         done < /tmp/hook_orphans.txt
     fi
 
+    # Restore the missing shrinker_rwsem declaration.
+    #
+    # mm/vmscan.c uses &shrinker_rwsem in 14 places, all under CONFIG_MEMCG,
+    # but nothing in the tree declares it, so vmscan.o fails with "use of
+    # undeclared identifier" for any config with MEMCG=y. include/linux/
+    # shrinker.h has no mention of it, and CONFIG_SHRINKER_DEBUG -- the only
+    # other candidate -- is `depends on NEVER` in lib/Kconfig.debug, so it
+    # cannot be enabled. Mainline keeps it as a file-scope static beside the
+    # other shrinker locks; restore exactly that. All references are inside
+    # mm/vmscan.c, so static is correct.
+    if [ -f "${KERNEL_DIR}/mm/vmscan.c" ] \
+       && grep -q 'DEFINE_RWLOCK(shrinker_rwlock)' "${KERNEL_DIR}/mm/vmscan.c" \
+       && ! grep -q 'DECLARE_RWSEM(shrinker_rwsem)' "${KERNEL_DIR}/mm/vmscan.c"; then
+        warn "Restoring missing DECLARE_RWSEM(shrinker_rwsem) in mm/vmscan.c"
+        awk '{print} /^static DEFINE_RWLOCK\(shrinker_rwlock\);$/ {print "#ifdef CONFIG_MEMCG"; print "static DECLARE_RWSEM(shrinker_rwsem);"; print "#endif"}' \
+             "${KERNEL_DIR}/mm/vmscan.c" > "${KERNEL_DIR}/mm/vmscan.c.tmp" \
+            && mv "${KERNEL_DIR}/mm/vmscan.c.tmp" "${KERNEL_DIR}/mm/vmscan.c"
+    fi
+    if [ -f "${KERNEL_DIR}/mm/vmscan.c" ] \
+       && ! grep -q 'DECLARE_RWSEM(shrinker_rwsem)' "${KERNEL_DIR}/mm/vmscan.c"; then
+        error "mm/vmscan.c is missing DECLARE_RWSEM(shrinker_rwsem); vmscan.o cannot compile with MEMCG=y"
+        exit 1
+    fi
+
     make O="${BUILD_DIR}" "${DEFCONFIG}"
 
     # Layer the Tensor G3 device drivers onto the generic GKI defconfig. The
