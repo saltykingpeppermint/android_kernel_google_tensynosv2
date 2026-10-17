@@ -332,6 +332,27 @@ jobs:
           # no WiFi/BT/charging/display drivers and would not boot on a Pixel 8.
           ./scripts/config --file .config --enable KCONFIG_EXT_ZUMA
 
+          # gki-stock_defconfig is a generic GKI snapshot and carries no
+          # Tensor/Exynos SoC identity at all. Layering the device drivers in
+          # via KCONFIG_EXT_ZUMA is not sufficient on its own, because once
+          # built they have to know WHICH SoC they target. Without it:
+          #
+          #   google-modules/soc/gs/include/soc/google/exynos-pmu-if.h:39
+          #       #error "Unknown CONFIG_SOC"
+          #   google-modules/aoc/aoc-interface.h:19
+          #       #error "Unsupported platform!"
+          #
+          # aoc-interface.h dispatches to aoc-interface-zuma.h / -gs201.h /
+          # -gs101.h purely on CONFIG_SOC_*. Falling through to the #error
+          # leaves every AoC translation unit compiling with no platform header
+          # at all, which is exactly the cascade run #108 reported: incomplete
+          # struct CMD_SYS_VERSION_GET, undeclared AUDIO_OUTPUT_SINKS, and
+          # -Wshift-count-overflow on shifts computed from an empty type. One
+          # missing symbol, not a dozen separate bugs.
+          #
+          # zuma_defconfig sets both at lines 747-748.
+          ./scripts/config --file .config --enable SOC_GOOGLE --enable SOC_ZUMA
+
           # gki-stock_defconfig ships two settings that only make sense on
           # Google's internal Bazel build machines:
           #   CONFIG_TRIM_UNUSED_KSYMS=y
@@ -365,6 +386,13 @@ jobs:
           # Sanity: our own options must have survived dependency resolution.
           if ! grep -q '^CONFIG_KCONFIG_EXT_ZUMA=y' .config; then
             echo "::error::CONFIG_KCONFIG_EXT_ZUMA lost; zuma device drivers would NOT be built"
+            exit 1
+          fi
+          # Fires at config time rather than minutes into the build, which is
+          # how run #108 cost a full cycle: the SoC symbol was simply absent
+          # and the failure only surfaced as a wall of downstream AoC errors.
+          if ! grep -q '^CONFIG_SOC_ZUMA=y' .config; then
+            echo "::error::CONFIG_SOC_ZUMA lost; Exynos and AoC drivers would hit 'Unsupported platform!'"
             exit 1
           fi
           # Guard against the silent autoksyms killer: this check fires at

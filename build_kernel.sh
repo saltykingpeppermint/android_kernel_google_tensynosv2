@@ -248,6 +248,14 @@ configure_kernel() {
     # drivers and will not boot on a Pixel 8.
     ./scripts/config --file "${BUILD_DIR}/.config" --enable KCONFIG_EXT_ZUMA
 
+    # gki-stock_defconfig is a generic GKI snapshot with no Tensor/Exynos SoC
+    # identity. The device drivers layered in above need CONFIG_SOC_ZUMA to
+    # pick their platform header: without it exynos-pmu-if.h hits
+    # #error "Unknown CONFIG_SOC" and aoc-interface.h hits
+    # #error "Unsupported platform!", leaving every AoC source compiling
+    # against no platform header and producing a cascade of bogus errors.
+    ./scripts/config --file "${BUILD_DIR}/.config" --enable SOC_GOOGLE --enable SOC_ZUMA
+
     # gki-stock_defconfig ships two settings that only make sense on Google's
     # internal Bazel build machines:
     #   CONFIG_TRIM_UNUSED_KSYMS=y
@@ -283,6 +291,10 @@ configure_kernel() {
     # than minutes into the build with no message.
     if ! grep -q '^CONFIG_KCONFIG_EXT_ZUMA=y' "${BUILD_DIR}/.config"; then
         error "CONFIG_KCONFIG_EXT_ZUMA lost; zuma device drivers would NOT be built"
+        exit 1
+    fi
+    if ! grep -q '^CONFIG_SOC_ZUMA=y' "${BUILD_DIR}/.config"; then
+        error "CONFIG_SOC_ZUMA lost; Exynos and AoC drivers would hit 'Unsupported platform!'"
         exit 1
     fi
     if grep -q '^CONFIG_UNUSED_KSYMS_WHITELIST=' "${BUILD_DIR}/.config"; then
