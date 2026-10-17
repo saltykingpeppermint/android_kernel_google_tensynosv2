@@ -110,26 +110,41 @@ jobs:
           # annotations). Warnings are filtered out; if nothing hard matches we
           # fall back to the raw tail so we are never blind again.
           BUILD_LOG="/tmp/kernel_build.log"
-          on_err() {
-            rc=$?
+          # emit_failure must be SIGPIPE-proof and `set -e`-proof. Both rules
+          # were learned the hard way:
+          #   1. A reader that closes early (`head -n 15`) sends SIGPIPE to the
+          #      producer. With `set -o pipefail` that becomes exit 141 inside
+          #      the trap, and `set -e` then aborts the trap before it writes a
+          #      single annotation. Run #107 lost BOTH jobs to exactly this,
+          #      the moment `make -k` started producing hundreds of error lines
+          #      instead of a handful.
+          #   2. So every stage here writes into a FILE rather than into a pipe
+          #      some downstream command might abandon, and the 15-line cap is
+          #      applied by awk stopping itself instead of by head.
+          emit_failure() {
+            rc="${1:-$?}"
+            set +e
+            set +o pipefail
             echo "::group::Build log tail (rc=${rc})"
-            tail -n 300 "${BUILD_LOG}" 2>/dev/null || true
+            tail -n 300 "${BUILD_LOG}" 2>/dev/null
             echo "::endgroup::"
-            # Dedupe by leading file path (awk '!seen[$1]++' keeps only the
-            # first match per source file). Without this one broken file eats
-            # the entire annotation budget: run #106 emitted 14 identical
-            # mm/vmscan.c lines and told us nothing about any other file.
-            hits=$(grep -iE "error:|error [0-9]+|undefined reference|No rule to make target|Traceback|fatal|Killed|make.*\*\*\*|command not found|cannot (find|open|access)" \
-                     "${BUILD_LOG}" 2>/dev/null \
-                   | grep -viE "syntaxwarning|deprecat" \
-                   | awk -F: '!seen[$1]++' \
-                   | head -n 15 | tr '\n' '|')
-            if [ -z "${hits}" ]; then
+            # Dedupe by leading source file. Without this one broken file eats
+            # the whole annotation budget: run #106 emitted 14 identical
+            # mm/vmscan.c lines and said nothing about any other file.
+            grep -iE "error:|error [0-9]+|undefined reference|No rule to make target|Traceback|fatal|Killed|make.*\*\*\*|command not found|cannot (find|open|access)" \
+                 "${BUILD_LOG}" 2>/dev/null \
+               | grep -viE "syntaxwarning|deprecat" > /tmp/kernel_build.raw
+            awk -F: '!seen[$1]++ {print; if (++n == 15) exit}' \
+                /tmp/kernel_build.raw > /tmp/kernel_build.hits
+            if [ -s /tmp/kernel_build.hits ]; then
+              hits="$(tr '\n' '|' < /tmp/kernel_build.hits)"
+            else
               hits="(no hard-error pattern matched) tail: $(tail -n 6 "${BUILD_LOG}" 2>/dev/null | tr '\n' '|')"
             fi
             echo "::error::BUILD FAILED (rc=${rc}) :: ${hits}"
             exit "${rc}"
           }
+          on_err() { emit_failure "$?"; }
           trap on_err ERR
 
           echo "=== Setting up isolated in-tree build ==="
@@ -405,14 +420,29 @@ jobs:
           # -k (keep going) is TEMPORARY triage mode. 16.0.0-sultan has proven
           # to be a lossy merge carrying several independent source bugs (an
           # undeclared tracepoint export, a missing DECLARE_RWSEM), and
-          # stopping at the first failure costs one ~10 minute CI cycle per
+          # stopping at the first failure costs one ~10-30 minute CI cycle per
           # bug. Letting make carry on surfaces every broken translation unit
           # in a single run. Set MAKE_KEEP_GOING back to "" once the tree
           # compiles clean.
           MAKE_KEEP_GOING="-k"
+          # Capture both pipeline statuses explicitly instead of leaning on
+          # pipefail: a signal death in the pipeline (run #107 exited 141,
+          # SIGPIPE) skipped the ERR trap and reported nothing at all, which
+          # cost a full CI cycle to discover. Reporting unconditionally means
+          # we always learn whether make, tee, or the pipeline died.
+          set +e
+          set +o pipefail
           make O= may-sync-config= -j"$(nproc)" ${MAKE_KEEP_GOING} \
             LLVM=1 LLVM_IAS=1 \
             Image dtbs modules 2>&1 | tee "${BUILD_LOG}"
+          MAKE_RC=${PIPESTATUS[0]}
+          TEE_RC=${PIPESTATUS[1]}
+          set -e
+          set -o pipefail
+          echo "=== make rc=${MAKE_RC} tee rc=${TEE_RC} ==="
+          if [ "${MAKE_RC}" -ne 0 ] || [ "${TEE_RC}" -ne 0 ]; then
+            emit_failure "${MAKE_RC}"
+          fi
 
           echo "=== Build outputs ==="
           ls -la arch/arm64/boot/Image
