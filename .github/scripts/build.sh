@@ -42,7 +42,12 @@ emit_failure() {
   # Dedupe by leading source file. Without this one broken file eats
   # the whole annotation budget: run #106 emitted 14 identical
   # mm/vmscan.c lines and said nothing about any other file.
-  grep -iE "error:|error [0-9]+|undefined reference|No rule to make target|Traceback|fatal|Killed|make.*\*\*\*|command not found|cannot (find|open|access)" \
+  # Broadened after a run emitted only
+  #   make[1]: *** [scripts/Makefile.vmlinux:34: vmlinux] Error 1
+  # and nothing about why. The actual cause was link-vmlinux.sh saying
+  # "pahole (pahole) is not available", which matched none of the
+  # original patterns and was therefore invisible.
+  grep -iE "error:|error [0-9]+|undefined reference|No rule to make target|Traceback|fatal|Killed|make.*\*\*\*|command not found|cannot (find|open|access)|is not available|too old|syntax error|invalid|No such file" \
        "${BUILD_LOG}" 2>/dev/null \
      | grep -viE "syntaxwarning|deprecat" > /tmp/kernel_build.raw
   awk -F: '!seen[$1]++ {print; if (++n == 15) exit}' \
@@ -50,9 +55,15 @@ emit_failure() {
   if [ -s /tmp/kernel_build.hits ]; then
     hits="$(tr '\n' '|' < /tmp/kernel_build.hits)"
   else
-    hits="(no hard-error pattern matched) tail: $(tail -n 6 "${BUILD_LOG}" 2>/dev/null | tr '\n' '|')"
+    hits="(no hard-error pattern matched)"
   fi
-  echo "::error::BUILD FAILED (rc=${rc}) :: ${hits}"
+  # The grep above is only ever as good as its pattern, and it just
+  # proved it can miss the cause completely. The run log cannot be
+  # downloaded unauthenticated, so this annotation is the ONLY channel
+  # available -- append the raw tail unconditionally instead of hoping
+  # the pattern happened to catch something actionable.
+  tail -n 25 "${BUILD_LOG}" 2>/dev/null > /tmp/kernel_build.tail
+  echo "::error::BUILD FAILED (rc=${rc}) :: ${hits} :: LOG_TAIL :: $(tr '\n' '|' < /tmp/kernel_build.tail)"
   exit "${rc}"
 }
 on_err() { emit_failure "$?"; }
@@ -313,6 +324,29 @@ make O= may-sync-config= gki-stock_defconfig
 # have. Drop the generic. CONFIG_ZSMALLOC stays on because it is the
 # shared backing allocator both implementations use, not a competitor.
 ./scripts/config --file .config --disable ZRAM
+
+# BTF generation is what stopped the build at the FINAL link step,
+# after every source file had already compiled. gki-stock_defconfig
+# sets CONFIG_DEBUG_INFO_BTF=y, and scripts/link-vmlinux.sh's gen_btf()
+# then requires pahole:
+#
+#   if ! [ -x "$(command -v ${PAHOLE})" ]; then
+#       echo >&2 "BTF: ${1}: pahole (${PAHOLE}) is not available"
+#
+# The workflow installs bc, bison, flex, lld and friends but not
+# `dwarves`, which is the package that provides pahole -- and that
+# message matches no error pattern, which is why the diagnostic
+# annotation showed only `make[1]: *** [scripts/Makefile.vmlinux:34:
+# vmlinux] Error 1` with no explanation attached.
+#
+# Rather than add the dependency, drop BTF. It is not needed to boot,
+# and there are two further risks in keeping it on this particular
+# build: every BTF record is derived from full DWARF debug info on an
+# unusually large all-built-in kernel, and BTF has hard size ceilings
+# that large kernels are known to hit. Skipping it removes a
+# dependency, a slow post-link pass and a size limit all at once. The
+# only thing lost is eBPF CO-RE type information.
+./scripts/config --file .config --disable DEBUG_INFO_BTF --disable DEBUG_INFO_BTF_MODULES
 
 # gki-stock_defconfig is a generic GKI snapshot and carries no
 # Tensor/Exynos SoC identity at all. Layering the device drivers in
