@@ -293,6 +293,27 @@ make O= may-sync-config= gki-stock_defconfig
 # two agree.
 ./scripts/config --file .config --enable CMUCAL_DEBUG
 
+# Two zram implementations, and this is a consequence of the base config
+# choice rather than a bug in the tree. The merge brought them together:
+#
+#   gki-stock_defconfig:  CONFIG_ZRAM=m     (generic upstream zram)
+#   zuma_defconfig:       CONFIG_ZRAM_GS=m  (Google's Pixel zram)
+#
+# The device fragment is SILENT on the generic ZRAM -- it has its own --
+# so merge_config.sh has nothing to overwrite and gki-stock's setting
+# survives. Both then build their own zcomp.c, and both define a global
+# `zcomp_available_algorithm`, which the link stage rejects as a
+# duplicate symbol. Note this is the first error in several runs that
+# occurs after every .c file has compiled, so the source tree is now
+# compiling end to end.
+#
+# Google's is the right one: zuma_defconfig asks for it explicitly, and
+# it adds zcomp_cpu.c (multi-CPU compression) and zcomp_eh.c (the
+# Emerald Hill hardware compressor) that the generic driver does not
+# have. Drop the generic. CONFIG_ZSMALLOC stays on because it is the
+# shared backing allocator both implementations use, not a competitor.
+./scripts/config --file .config --disable ZRAM
+
 # gki-stock_defconfig is a generic GKI snapshot and carries no
 # Tensor/Exynos SoC identity at all. Layering the device drivers in
 # via KCONFIG_EXT_ZUMA is not sufficient on its own, because once
@@ -371,6 +392,14 @@ fi
 # behaves -- it forces MODULES=n -- so it makes a good canary.
 if ! grep -q '^CONFIG_INTEGRATE_MODULES=y' .config; then
   echo "::error::arch/arm64/configs/zuma_defconfig did not merge into .config; drivers would build with the wrong platform options"
+  exit 1
+fi
+# A duplicate-symbol failure only appears at the link stage, after every
+# .c file in the tree has compiled -- roughly a 30-minute cycle to
+# discover for a one-line config problem. Catch it here instead.
+# Deliberately anchored so CONFIG_ZRAM_GS is not matched.
+if grep -q '^CONFIG_ZRAM=' .config; then
+  echo "::error::CONFIG_ZRAM re-enabled alongside CONFIG_ZRAM_GS; both define zcomp_available_algorithm and the link will fail"
   exit 1
 fi
 # Guard against the silent autoksyms killer: this check fires at
