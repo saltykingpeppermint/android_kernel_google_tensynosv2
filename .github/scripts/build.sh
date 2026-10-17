@@ -187,6 +187,61 @@ if ! grep -q 'DECLARE_RWSEM(shrinker_rwsem)' mm/vmscan.c; then
 fi
 grep -n -B2 -A4 'DECLARE_RWSEM(shrinker_rwsem)' mm/vmscan.c
 
+# Always build the EdgeTPU telemetry and tracepoint objects.
+#
+# google-modules/edgetpu/rio/drivers/edgetpu/Kbuild has:
+#
+#   ifdef CONFIG_EDGETPU_TELEMETRY_TRACE
+#   edgetpu-objs	+= edgetpu-telemetry.o edgetpu-trace.o
+#   endif
+#
+# and then `rio-objs := rio-core.o ... $(edgetpu-objs)`. Every rio-*.c
+# calls the edgetpu tracepoints unconditionally, but the ONLY
+# translation unit that defines them is gated here: edgetpu-trace.c is
+# nothing but `#define CREATE_TRACE_POINTS` plus the trace header.
+#
+# CONFIG_EDGETPU_TELEMETRY_TRACE is defined by no Kconfig anywhere in
+# this tree, so auto.conf can never carry it and that ifdef can never
+# open. The result is a driver that cannot link no matter what config
+# is chosen:
+#
+#   ld.lld: error: undefined symbol: __traceiter_edgetpu_client_create
+#   >>> referenced by edgetpu.h:372 (.../trace/events/edgetpu.h:372)
+#   >>>   google-modules/edgetpu/rio/drivers/edgetpu/rio.o
+#   ld.lld: error: too many errors emitted, stopping now
+#
+# Same shape as the orphaned vendor-hook exports fixed above: a lossy
+# merge that kept the call sites and lost the definitions.
+#
+# Drop the gate rather than disable the driver, which would cost the
+# Tensor TPU. Both objects are un-gated together to match what
+# upstream's real build produces -- in their tree the config exists and
+# both are built, so rio-*.c may well reference telemetry as well, and
+# un-gating only the trace object would just trade this error for
+# another undefined symbol.
+ET_KB="google-modules/edgetpu/rio/drivers/edgetpu/Kbuild"
+if [ -f "${ET_KB}" ] && grep -q 'CONFIG_EDGETPU_TELEMETRY_TRACE' "${ET_KB}"; then
+  echo "=== Un-gating edgetpu-trace.o from CONFIG_EDGETPU_TELEMETRY_TRACE ==="
+  # NB: Ubuntu's awk is mawk, which does not support the \s shorthand,
+  # so these patterns spell the character classes out.
+  awk '
+    /^[ \t]*ifdef[ \t]+CONFIG_EDGETPU_TELEMETRY_TRACE[ \t]*$/ {
+      print "# CI patch: CONFIG_EDGETPU_TELEMETRY_TRACE is defined by no Kconfig in"
+      print "# this tree, so this gate could never open. rio-*.c call the edgetpu"
+      print "# tracepoints unconditionally, which left __traceiter_edgetpu_* undefined"
+      print "# at link. Gate removed. See .github/scripts/build.sh."
+      gate = 1; next
+    }
+    gate == 1 && /^[ \t]*endif[ \t]*$/ { gate = 0; next }
+    { print }
+  ' "${ET_KB}" > "${ET_KB}.tmp" && mv "${ET_KB}.tmp" "${ET_KB}"
+fi
+if [ -f "${ET_KB}" ] && grep -q 'ifdef[[:space:]]*CONFIG_EDGETPU_TELEMETRY_TRACE' "${ET_KB}"; then
+  echo "::error::could not un-gate edgetpu-trace.o; rio would fail to link with undefined __traceiter_edgetpu_*"
+  exit 1
+fi
+grep -n -B1 -A2 'edgetpu-trace\.o' "${ET_KB}" 2>/dev/null || true
+
 # Apply build configs
 if [ "${ENABLE_KSU}" = "true" ]; then
   if ! grep -q "CONFIG_KSU=y" build.config.common; then
