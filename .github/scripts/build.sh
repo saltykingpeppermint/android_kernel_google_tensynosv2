@@ -274,6 +274,25 @@ make O= may-sync-config= gki-stock_defconfig
 # gki-stock_defconfig and Google's own clang build use.
 ./scripts/config --file .config --disable LTO_GCC
 
+# Gunyah is Qualcomm's type-1 hypervisor. It arrives via the generic GKI
+# base (gki-stock_defconfig sets CONFIG_GUNYAH=y) and zuma_defconfig
+# never mentions it, so it is not part of what this device actually
+# builds. With INTEGRATE_MODULES=y forcing MODULES=n it becomes a hard
+# failure rather than dead weight: drivers/virt/gunyah/vm_mgr.c:182
+# calls module_refcount(), which is only declared under CONFIG_MODULES,
+# and clang 17 promotes the implicit declaration to an error.
+./scripts/config --file .config --disable GUNYAH
+
+# vclk.h chooses between real prototypes and static inline stubs with
+# `#if IS_ENABLED(CONFIG_CMUCAL_DEBUG)`, but cmucal-debug.c guards its
+# definitions with CONFIG_DEBUG_FS instead. With DEBUG_FS=y and
+# CMUCAL_DEBUG unset both halves are active at once: the header emits a
+# `static inline vclk_debug_clk_get_rate` and the .c file then defines a
+# global with the same signature, which is a redefinition error. Turning
+# CMUCAL_DEBUG on makes vclk.h switch to the extern declarations so the
+# two agree.
+./scripts/config --file .config --enable CMUCAL_DEBUG
+
 # gki-stock_defconfig is a generic GKI snapshot and carries no
 # Tensor/Exynos SoC identity at all. Layering the device drivers in
 # via KCONFIG_EXT_ZUMA is not sufficient on its own, because once
@@ -424,8 +443,32 @@ MAKE_KEEP_GOING="-k"
 # we always learn whether make, tee, or the pipeline died.
 set +e
 set +o pipefail
+# KCFLAGS is appended after KBUILD_CFLAGS, so these override the kernel's
+# own settings. Two separate problems are solved here.
+#
+# Include path: google-modules/lwis/Kbuild adds
+#   ccflags-y += -I$(abspath $(KERNEL_SRC)/$(M))
+# and $(M) -- the module source directory -- is only set when the object
+# is a loadable module. LWIS is declared as `bool` in its Kconfig, so it
+# is always built-in, $(M) comes out empty, and the -I resolves to the
+# top of the tree. Both failures in run #111 (lwis_trace.h and
+# lwis_commands.h not found) are that single broken path: all 37 LWIS
+# headers live in google-modules/lwis/, which nothing else puts on the
+# include path for a built-in object. Note this is NOT a wrong-platform
+# problem -- the Kbuild maps CONFIG_SOC_ZUMA=y to platform/casablanca/,
+# so casablanca really is this device's LWIS platform.
+#
+# Warnings promoted to errors: this is a 6.1 tree compiled with a newer
+# clang than it was written for, and several Google drivers trip warning
+# classes that were not errors when they were written. Relax exactly the
+# four seen so far instead of blanket-disabling -Werror, which would
+# let genuinely broken code end up flashed onto a phone. The frame limit
+# is raised to 8192 rather than dropped: arm64 stacks are 16 KiB so
+# 2096 bytes is not actually at risk, and the guard is worth keeping at
+# a sane bound.
+KCFLAGS="-Wno-error=format-security -Wno-error=unused-but-set-variable -Wno-error=parentheses-equality -Wframe-larger-than=8192 -I${BUILD_DIR}/google-modules/lwis"
 make O= may-sync-config= -j"$(nproc)" ${MAKE_KEEP_GOING} \
-  LLVM=1 LLVM_IAS=1 \
+  LLVM=1 LLVM_IAS=1 KCFLAGS="${KCFLAGS}" \
   Image dtbs 2>&1 | tee "${BUILD_LOG}"
 MAKE_RC=${PIPESTATUS[0]}
 TEE_RC=${PIPESTATUS[1]}
