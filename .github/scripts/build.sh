@@ -235,13 +235,44 @@ echo "=== Generating .config (in-tree) ==="
 # KernelSU is buildable here.
 make O= may-sync-config= gki-stock_defconfig
 
-# Layer the Tensor G3 device drivers onto the generic GKI defconfig.
+# Layer the Tensor G3 device fragment on top of the GKI base, the same
+# way Google's own build assembles it. gki-stock_defconfig is the
+# generic clang/GKI base; arch/arm64/configs/zuma_defconfig is this
+# device's fragment (849 options, CONFIG_LOCALVERSION="-Sultan").
+#
+# The fragment has to be MERGED, never used on its own: it defines no
+# base options at all -- no CONFIG_SMP, MMU, MODULES, NET or BLOCK --
+# so `make zuma_defconfig` alone would produce a kernel with almost
+# everything disabled and it would not boot.
+#
+# Hand-patching the GKI base is what kept burning CI cycles. Run #108
+# needed CONFIG_SOC_ZUMA added by hand to clear the aoc #error. Run #110
+# then failed across lwis, mali GPU DVFS, BCL and modem_notifier,
+# because a generic base has no Tensor device options: it selects LWIS
+# platform `casablanca`, whose headers (lwis_commands.h, lwis_trace.h)
+# do not exist for zuma, and it leaves CONFIG_PM_QOS and the S2MPG14
+# PMIC options off, leaving exynos_pm_qos_* and
+# S2MPG14_PM_SMPL_WARN_CTRL undeclared. Merging the fragment supplies
+# every one of those at once instead of one per CI cycle.
+./scripts/kconfig/merge_config.sh -m .config arch/arm64/configs/zuma_defconfig
+
 # The root Kconfig gates google-devices/zuma/Kconfig.ext.zuma (45
 # Google/Exynos driver Kconfigs: zram, clk, cpufreq, power, pinctrl,
 # ...) behind the KCONFIG_EXT_ZUMA choice symbol, which defaults to
 # KCONFIG_EXT_NONE. Without this the build would be generic GKI with
 # no WiFi/BT/charging/display drivers and would not boot on a Pixel 8.
+# The merged fragment already sets it; enable it here anyway so this
+# guard stays meaningful if the fragment ever stops carrying it.
 ./scripts/config --file .config --enable KCONFIG_EXT_ZUMA
+
+# zuma_defconfig sets CONFIG_LTO_GCC=y because it was authored for a
+# GCC toolchain. The Makefile's LTO_GCC branch emits GCC-only flags
+# (-fipa-pta -fno-fat-lto-objects -fuse-linker-plugin -fwhole-program)
+# and reassigns AR/NM to gcc-ar/gcc-nm; clang rejects those and -Werror
+# promotes it to a hard failure in prepare0. We build with LLVM=1, so
+# drop it. The LTO choice then falls back to LTO_NONE, the same value
+# gki-stock_defconfig and Google's own clang build use.
+./scripts/config --file .config --disable LTO_GCC
 
 # gki-stock_defconfig is a generic GKI snapshot and carries no
 # Tensor/Exynos SoC identity at all. Layering the device drivers in
@@ -286,7 +317,14 @@ make O= may-sync-config= gki-stock_defconfig
 
 ./scripts/config --file .config \
   --enable BLUETOOTH_POWERSAVE_EXCLUDE --enable WIFI_POWERSAVE_EXCLUDE \
-  --enable DEBUG_REBOOT --set-str LOCALVERSION "-kernelsu-next"
+  --enable DEBUG_REBOOT
+# zuma_defconfig carries CONFIG_LOCALVERSION="-Sultan". Only replace it
+# when KernelSU is really being built, otherwise a KSU-less kernel
+# reports `uname -r` as -kernelsu-next, which sends anyone debugging a
+# flashed device after the wrong thing.
+if [ "${ENABLE_KSU}" = "true" ]; then
+  ./scripts/config --file .config --set-str LOCALVERSION "-kernelsu-next"
+fi
 if [ "${ENABLE_KSU}" = "true" ]; then
   ./scripts/config --file .config --enable KSU --enable KPROBES --enable EXT4_FS
 fi
@@ -304,6 +342,16 @@ fi
 # and the failure only surfaced as a wall of downstream AoC errors.
 if ! grep -q '^CONFIG_SOC_ZUMA=y' .config; then
   echo "::error::CONFIG_SOC_ZUMA lost; Exynos and AoC drivers would hit 'Unsupported platform!'"
+  exit 1
+fi
+# Verify the device fragment actually merged. Without it the build is a
+# generic GKI kernel carrying none of the Tensor device options, which
+# is precisely what produced run #110's LWIS / Mali GPU / BCL /
+# modem_notifier failures. INTEGRATE_MODULES is set only by
+# zuma_defconfig and is the option that most changes how the build
+# behaves -- it forces MODULES=n -- so it makes a good canary.
+if ! grep -q '^CONFIG_INTEGRATE_MODULES=y' .config; then
+  echo "::error::arch/arm64/configs/zuma_defconfig did not merge into .config; drivers would build with the wrong platform options"
   exit 1
 fi
 # Guard against the silent autoksyms killer: this check fires at
@@ -351,11 +399,16 @@ ls -la .config include/config/ include/generated/autoconf.h
 
 echo "=== Building kernel (in-tree) ==="
 
-# gki-stock_defconfig sets CONFIG_MODULES=y, so the zuma device
-# drivers layering in via KCONFIG_EXT_ZUMA are real =m modules, not
-# built into the Image. Build modules alongside Image/dtbs so the
-# .ko files exist to ship; AK3 installs them into the boot image's
-# ramdisk (/lib/modules) so they load on boot.
+# The zuma_defconfig fragment sets CONFIG_INTEGRATE_MODULES=y, which
+# forces MODULES=n (kernel/module/Kconfig). Every device driver that
+# layers in through KCONFIG_EXT_ZUMA is therefore compiled straight
+# into the Image instead of being emitted as a .ko. That is the more
+# robust outcome for a flashable zip: there is nothing left to load at
+# boot and no module install path that can be got wrong. It does mean
+# `make modules` has no rule to make, so Image/dtbs is the whole
+# build. The staging block below stays conditional on CONFIG_MODULES
+# so this script still works if the fragment is ever changed to
+# ship modules again.
 # -k (keep going) is TEMPORARY triage mode. 16.0.0-sultan has proven
 # to be a lossy merge carrying several independent source bugs (an
 # undeclared tracepoint export, a missing DECLARE_RWSEM), and
@@ -373,7 +426,7 @@ set +e
 set +o pipefail
 make O= may-sync-config= -j"$(nproc)" ${MAKE_KEEP_GOING} \
   LLVM=1 LLVM_IAS=1 \
-  Image dtbs modules 2>&1 | tee "${BUILD_LOG}"
+  Image dtbs 2>&1 | tee "${BUILD_LOG}"
 MAKE_RC=${PIPESTATUS[0]}
 TEE_RC=${PIPESTATUS[1]}
 set -e
@@ -404,28 +457,37 @@ rm -rf "${AK3_DIR}/modules"
 cp arch/arm64/boot/Image "${AK3_DIR}/"
 mkdir -p "${AK3_DIR}/dtb"
 cp arch/arm64/boot/dts/google/*.dtb "${AK3_DIR}/dtb/" 2>/dev/null || true
-# Stage the =m modules into the boot ramdisk overlay so they land in
-# /lib/modules and load on boot. AK3 re-packs the whole ramdisk from
-# its ramdisk/ dir (ak3-core.sh:266 `find . | cpio`), so anything
-# placed here is merged into the boot image. The modules/ dir is only
-# for KernelSU/Magisk helper modules, NOT for .ko installation, and
-# do.modules=1 additionally requires do.systemless=1 -- so keep
-# do.modules=0 and ship the .ko files via the ramdisk instead.
-MODREL="$(cat include/config/kernel.release 2>/dev/null || echo unknown)"
-RDRAM="${AK3_DIR}/ramdisk"
-MODDIR="${RDRAM}/lib/modules/${MODREL}"
-mkdir -p "${MODDIR}"
-# Best-effort strip: CFI/CFI-kcfi .ko files may not strip cleanly and
-# that is not fatal, so ignore strip failures but not copy failures.
-find . -name '*.ko' -not -path './.git/*' -print0 \
-  | xargs -0 -r -n50 llvm-strip --strip-debug 2>/dev/null || true
-KOCOUNT=$(find . -name '*.ko' -not -path './.git/*' | wc -l)
-if [ "${KOCOUNT}" -eq 0 ]; then
-  echo "::error::No .ko modules were built; zuma device drivers (WiFi/BT/charging) would be missing"
-  exit 1
+# With CONFIG_INTEGRATE_MODULES=y (set by the zuma fragment) the device
+# drivers are built into the Image and no .ko files exist at all. Stage
+# modules only when CONFIG_MODULES=y, so a built-in build skips this
+# cleanly instead of dying on an empty find result -- but keep the
+# zero-module hard error when modules ARE expected, because a silent
+# skip there would ship a kernel missing its WiFi/BT/charging drivers.
+# AK3 re-packs the whole ramdisk from its ramdisk/ dir
+# (ak3-core.sh:266 `find . | cpio`), so anything placed here is merged
+# into the boot image. The modules/ dir is only for KernelSU/Magisk
+# helper modules, NOT for .ko installation, and do.modules=1
+# additionally requires do.systemless=1 -- so keep do.modules=0 and
+# ship any .ko files via the ramdisk instead.
+if grep -q '^CONFIG_MODULES=y' .config; then
+  MODREL="$(cat include/config/kernel.release 2>/dev/null || echo unknown)"
+  RDRAM="${AK3_DIR}/ramdisk"
+  MODDIR="${RDRAM}/lib/modules/${MODREL}"
+  mkdir -p "${MODDIR}"
+  # Best-effort strip: CFI/CFI-kcfi .ko files may not strip cleanly and
+  # that is not fatal, so ignore strip failures but not copy failures.
+  find . -name '*.ko' -not -path './.git/*' -print0 \
+    | xargs -0 -r -n50 llvm-strip --strip-debug 2>/dev/null || true
+  KOCOUNT=$(find . -name '*.ko' -not -path './.git/*' | wc -l)
+  if [ "${KOCOUNT}" -eq 0 ]; then
+    echo "::error::CONFIG_MODULES=y but no .ko modules were built; zuma device drivers (WiFi/BT/charging) would be missing"
+    exit 1
+  fi
+  find . -name '*.ko' -not -path './.git/*' -exec cp {} "${MODDIR}/" \;
+  echo "=== Staged ${KOCOUNT} .ko into ramdisk /lib/modules/${MODREL} ==="
+else
+  echo "=== CONFIG_MODULES=n: drivers are built into the Image, nothing to stage ==="
 fi
-find . -name '*.ko' -not -path './.git/*' -exec cp {} "${MODDIR}/" \;
-echo "=== Staged ${KOCOUNT} .ko into ramdisk /lib/modules/${MODREL} ==="
 
 cat > "${AK3_DIR}/anykernel.sh" << 'AKEOF'
 ### AnyKernel setup
