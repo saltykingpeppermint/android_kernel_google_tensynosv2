@@ -443,30 +443,43 @@ MAKE_KEEP_GOING="-k"
 # we always learn whether make, tee, or the pipeline died.
 set +e
 set +o pipefail
-# KCFLAGS is appended after KBUILD_CFLAGS, so these override the kernel's
-# own settings. Two separate problems are solved here.
+# Passing KCFLAGS on the command line overrides every assignment to it in
+# the Makefile, so this string must carry anything the tree relied on
+# setting itself. Exactly one such flag exists, and losing it cost a
+# whole CI cycle:
+#
+#   Makefile:10: KCFLAGS += -D__ANDROID_COMMON_KERNEL__
+#
+# Run #111's two Mali errors looked unrelated and neither mentioned the
+# macro, but both are its absence:
+#   - version_compat_defs.h:230 redefinition of vm_flags_set. The guard
+#     is `!((6.3 <= V) || ((6.1.25 <= V) && __ANDROID_COMMON_KERNEL__))`.
+#     This kernel is 6.1.145 so the version half alone should have
+#     suppressed the block -- it did not, because the macro was missing.
+#   - mali_kbase_mmap.c:350 undeclared tmp_info. Line 350 sits in the
+#     #else half of `#ifdef __ANDROID_COMMON_KERNEL__` and uses a
+#     variable only declared in the #if half.
+# Re-declaring the macro fixes both.
 #
 # Include path: google-modules/lwis/Kbuild adds
 #   ccflags-y += -I$(abspath $(KERNEL_SRC)/$(M))
 # and $(M) -- the module source directory -- is only set when the object
 # is a loadable module. LWIS is declared as `bool` in its Kconfig, so it
 # is always built-in, $(M) comes out empty, and the -I resolves to the
-# top of the tree. Both failures in run #111 (lwis_trace.h and
-# lwis_commands.h not found) are that single broken path: all 37 LWIS
-# headers live in google-modules/lwis/, which nothing else puts on the
-# include path for a built-in object. Note this is NOT a wrong-platform
-# problem -- the Kbuild maps CONFIG_SOC_ZUMA=y to platform/casablanca/,
-# so casablanca really is this device's LWIS platform.
+# top of the tree. Both LWIS failures (lwis_trace.h and lwis_commands.h
+# not found) are that single broken path: all 37 LWIS headers live in
+# google-modules/lwis/, which nothing else puts on the include path for a
+# built-in object. Note this is NOT a wrong-platform problem -- the Kbuild
+# maps CONFIG_SOC_ZUMA=y to platform/casablanca/, so casablanca really is
+# this device's LWIS platform.
 #
-# Warnings promoted to errors: this is a 6.1 tree compiled with a newer
-# clang than it was written for, and several Google drivers trip warning
-# classes that were not errors when they were written. Relax exactly the
-# four seen so far instead of blanket-disabling -Werror, which would
-# let genuinely broken code end up flashed onto a phone. The frame limit
-# is raised to 8192 rather than dropped: arm64 stacks are 16 KiB so
-# 2096 bytes is not actually at risk, and the guard is worth keeping at
-# a sane bound.
-KCFLAGS="-Wno-error=format-security -Wno-error=unused-but-set-variable -Wno-error=parentheses-equality -Wframe-larger-than=8192 -I${BUILD_DIR}/google-modules/lwis"
+# Warnings promoted to errors: a 6.1 tree compiled with a newer clang
+# than it was written for. Relax exactly the classes seen so far rather
+# than blanket-disabling -Werror, which would let genuinely broken code
+# end up flashed onto a phone. The frame limit is raised to 8192 rather
+# than dropped: arm64 stacks are 16 KiB so 2096 bytes was never at risk
+# and the guard is worth keeping at a sane bound.
+KCFLAGS="-D__ANDROID_COMMON_KERNEL__ -Wno-error=format-security -Wno-error=unused-but-set-variable -Wno-error=unused-const-variable -Wno-error=parentheses-equality -Wno-error=division-by-zero -Wframe-larger-than=8192 -I${BUILD_DIR}/google-modules/lwis"
 make O= may-sync-config= -j"$(nproc)" ${MAKE_KEEP_GOING} \
   LLVM=1 LLVM_IAS=1 KCFLAGS="${KCFLAGS}" \
   Image dtbs 2>&1 | tee "${BUILD_LOG}"
