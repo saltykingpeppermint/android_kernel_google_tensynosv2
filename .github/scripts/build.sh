@@ -562,14 +562,19 @@ echo "=== Building kernel (in-tree) ==="
 # build. The staging block below stays conditional on CONFIG_MODULES
 # so this script still works if the fragment is ever changed to
 # ship modules again.
-# -k (keep going) is TEMPORARY triage mode. 16.0.0-sultan has proven
-# to be a lossy merge carrying several independent source bugs (an
-# undeclared tracepoint export, a missing DECLARE_RWSEM), and
-# stopping at the first failure costs one ~10-30 minute CI cycle per
-# bug. Letting make carry on surfaces every broken translation unit
-# in a single run. Set MAKE_KEEP_GOING back to "" once the tree
-# compiles clean.
-MAKE_KEEP_GOING="-k"
+# MAKE_KEEP_GOING was "-k" for the whole debug phase. 16.0.0-sultan
+# turned out to be a lossy merge carrying several independent source
+# bugs (an undeclared tracepoint export, a missing DECLARE_RWSEM, a
+# config-gated file that could never be gated open), and stopping at the
+# first failure cost one 10-30 minute CI cycle per bug, so letting make
+# carry on surfaced every broken translation unit in a single run.
+#
+# The tree has compiled clean since run #117, so this is back to "".
+# -k would not have hidden a genuine breakage -- any failed prerequisite
+# leaves vmlinux and thus Image unbuildable, so the AK3 step would have
+# failed anyway -- but it costs the fail-fast behaviour and only earns
+# its keep while there are many bugs per run to collect.
+MAKE_KEEP_GOING=""
 # Capture both pipeline statuses explicitly instead of leaning on
 # pipefail: a signal death in the pipeline (run #107 exited 141,
 # SIGPIPE) skipped the ERR trap and reported nothing at all, which
@@ -692,7 +697,14 @@ properties() {
   device.name2=shusky
   device.name3=husky
   device.name4=akita
-  device.name5=tokay
+  # NB: `tokay` was previously listed here. It is the Pixel 9, which
+  # runs Tensor G4 on the caimito platform -- not this kernel's target.
+  # do.devicecheck=1 would have accepted a flash of a G3/zuma Image onto
+  # a G4 device, which does not survive it. The three names above are
+  # the complete set of Tensor G3 Pixels: 8, 8 Pro and 8a. Adding a
+  # device here means confirming its SoC is Tensor G3 first.
+  # supported.versions is "-" (any) because AK3 cannot read the vendor
+  # build fingerprint reliably on Android 14+.
   supported.versions=-
 }
 

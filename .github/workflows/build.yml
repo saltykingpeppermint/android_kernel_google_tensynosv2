@@ -39,6 +39,14 @@ jobs:
     name: Build Kernel (${{ matrix.build_type }})
     runs-on: ubuntu-latest
     timeout-minutes: 180
+    # Required by the release step below. On a v* tag push this job
+    # creates a GitHub Release and attaches the flashable zip, using the
+    # workflow's GITHUB_TOKEN -- but that token is read-only by default
+    # on repositories created after 2023 unless permissions are granted
+    # explicitly. Without this block every build step succeeds and the
+    # release step then fails with a 403 on the releases API.
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -106,15 +114,29 @@ jobs:
             ${{ env.DIST_DIR }}/*
           retention-days: 30
 
+      # Runs on a tag push only, and deliberately on ONE matrix leg.
+      # Both legs build in parallel and would otherwise race to create
+      # the same release: the loser gets a 422 "already exists" and the
+      # run ends red even though the build was fine. Restricting it to
+      # the release leg makes that impossible and keeps the asset names
+      # stable. The debug build remains available as a workflow
+      # artifact.
+      #
+      # assets are limited to what a person can actually use. vmlinux is
+      # excluded on purpose: built with CONFIG_DEBUG_INFO_DWARF4 its
+      # symbols run to a multi-gigabyte file, and GitHub caps a single
+      # release asset at 2 GiB -- one oversized file fails the step
+      # after the zip is already attached, leaving a half-populated
+      # release. It stays downloadable from the workflow artifact for
+      # 30 days.
       - name: Create release (on tag push)
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v1
+        if: startsWith(github.ref, 'refs/tags/') && matrix.build_type == 'release'
+        uses: softprops/action-gh-release@v2
         with:
           files: |
             ${{ env.DIST_DIR }}/*.zip
             ${{ env.DIST_DIR }}/Image-*
             ${{ env.DIST_DIR }}/config-*
-            ${{ env.DIST_DIR }}/vmlinux-*
           generate_release_notes: true
           draft: false
           prerelease: false
