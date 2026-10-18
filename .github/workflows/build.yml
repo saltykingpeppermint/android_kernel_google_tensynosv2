@@ -139,4 +139,10 @@ jobs:
             ${{ env.DIST_DIR }}/config-*
           generate_release_notes: true
           draft: false
-          prerelease: false
+          # Marked prerelease because the kernel compiles and packages
+          # cleanly but has never been booted on actual hardware -- CI
+          # can prove an Image links, not that it comes up on a phone.
+          # Flip to false once it has been flashed to a Pixel 8 and
+          # verified working (boot, WiFi/BT, charging, the 10-restart
+          # retry), along with moving the tag past v0.x.
+          prerelease: true
