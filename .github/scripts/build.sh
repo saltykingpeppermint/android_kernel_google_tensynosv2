@@ -214,11 +214,22 @@ grep -n -B2 -A4 'DECLARE_RWSEM(shrinker_rwsem)' mm/vmscan.c
 # merge that kept the call sites and lost the definitions.
 #
 # Drop the gate rather than disable the driver, which would cost the
-# Tensor TPU. Both objects are un-gated together to match what
-# upstream's real build produces -- in their tree the config exists and
-# both are built, so rio-*.c may well reference telemetry as well, and
-# un-gating only the trace object would just trade this error for
-# another undefined symbol.
+# Tensor TPU.
+#
+# IMPORTANT: only edgetpu-trace.o is un-gated. A previous attempt also
+# un-gated edgetpu-telemetry.o and immediately produced:
+#
+#   edgetpu-telemetry.c:46:5: error: redefinition of
+#       'edgetpu_telemetry_init'
+#
+# for the same reason this whole patch exists. edgetpu-telemetry.h
+# chooses between real prototypes and static inline stubs with
+# `#if IS_ENABLED(CONFIG_EDGETPU_TELEMETRY_TRACE)` ... `#else` ..., and
+# that symbol is defined by no Kconfig anywhere, so the stubs are
+# ALWAYS active. The .c file then defines the same functions a second
+# time. Leaving it out costs nothing: the header already supplies
+# working no-op stubs, so rio-*.c need neither the object nor the
+# config.
 ET_KB="google-modules/edgetpu/rio/drivers/edgetpu/Kbuild"
 if [ -f "${ET_KB}" ] && grep -q 'CONFIG_EDGETPU_TELEMETRY_TRACE' "${ET_KB}"; then
   echo "=== Un-gating edgetpu-trace.o from CONFIG_EDGETPU_TELEMETRY_TRACE ==="
@@ -226,12 +237,17 @@ if [ -f "${ET_KB}" ] && grep -q 'CONFIG_EDGETPU_TELEMETRY_TRACE' "${ET_KB}"; the
   # so these patterns spell the character classes out.
   awk '
     /^[ \t]*ifdef[ \t]+CONFIG_EDGETPU_TELEMETRY_TRACE[ \t]*$/ {
+      print "edgetpu-objs += edgetpu-trace.o"
       print "# CI patch: CONFIG_EDGETPU_TELEMETRY_TRACE is defined by no Kconfig in"
-      print "# this tree, so this gate could never open. rio-*.c call the edgetpu"
-      print "# tracepoints unconditionally, which left __traceiter_edgetpu_* undefined"
-      print "# at link. Gate removed. See .github/scripts/build.sh."
+      print "# this tree, so this gate could never open and rio-*.c were left calling"
+      print "# tracepoints nobody defined (__traceiter_edgetpu_* undefined at link)."
+      print "# Only edgetpu-trace.o is un-gated; edgetpu-telemetry.o must stay out"
+      print "# because edgetpu-telemetry.h guards on the same impossible symbol and"
+      print "# therefore always supplies static inline stubs, which the .c file then"
+      print "# redefines. See .github/scripts/build.sh."
       gate = 1; next
     }
+    gate == 1 && /^[ \t]*edgetpu-objs[ \t]*\+=[ \t]*edgetpu-telemetry\.o/ { next }
     gate == 1 && /^[ \t]*endif[ \t]*$/ { gate = 0; next }
     { print }
   ' "${ET_KB}" > "${ET_KB}.tmp" && mv "${ET_KB}.tmp" "${ET_KB}"
