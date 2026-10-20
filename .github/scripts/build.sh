@@ -633,25 +633,78 @@ fi
 
 echo "=== Build outputs ==="
 ls -la arch/arm64/boot/Image
-ls -la arch/arm64/boot/dts/google/*.dtb 2>/dev/null || true
 
-# Copy artifacts
+# Locate the built device trees. The path is deliberately NOT hardcoded:
+# this tree keeps its DTS sources outside arch/arm64/boot/dts, so the
+# previous `cp arch/arm64/boot/dts/google/*.dtb ... || true` matched
+# nothing on every single build and its failure was swallowed by the
+# trailing `|| true` -- which is how a zip shipped with an empty dtb/
+# directory and no device tree in it at all. Fail loudly from here on:
+# a kernel flashed with a missing DTB does not come up, and a silent
+# skip is indistinguishable from a working build in the CI log.
+#
+# find | sort (not a glob) so the list is deterministic across runners,
+# which matters because these blobs are concatenated in this order.
+DTB_LIST="$(find . -name '*.dtb' -not -path './.git/*' -not -path './out/*' | LC_ALL=C sort)"
+DTBCOUNT="$(printf '%s\n' "${DTB_LIST}" | sed '/^$/d' | wc -l)"
+if [ "${DTBCOUNT}" -eq 0 ]; then
+  echo "::error::make dtbs produced no .dtb anywhere under $(pwd)"
+  find . \( -name '*.dtb*' -o -name '*.dtbo' \) -not -path './.git/*' | head -n 25
+  exit 1
+fi
+echo "=== Found ${DTBCOUNT} .dtb ==="
+printf '%s\n' "${DTB_LIST}"
+
+# Copy artifacts. Unquoted expansion of DTB_LIST is intentional: these
+# are kernel build paths, which contain no whitespace.
 mkdir -p "${DIST_DIR}"
 cp arch/arm64/boot/Image "${DIST_DIR}/Image-${BUILD_TYPE}"
 cp .config "${DIST_DIR}/config-${BUILD_TYPE}"
 cp vmlinux "${DIST_DIR}/vmlinux-${BUILD_TYPE}" 2>/dev/null || true
 mkdir -p "${DIST_DIR}/dtb"
-cp arch/arm64/boot/dts/google/*.dtb "${DIST_DIR}/dtb/" 2>/dev/null || true
+cp ${DTB_LIST} "${DIST_DIR}/dtb/"
 
 echo "=== Creating AnyKernel3 flashable zip ==="
 AK3_DIR="/tmp/anykernel3"
 rm -rf "${AK3_DIR}"
-git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git "${AK3_DIR}"
-rm -f "${AK3_DIR}/Image" "${AK3_DIR}/dtb"
+# Pin AnyKernel3 to the same era as the reference build that is known to
+# flash on this device -- its updater-script declares AK_BASE_VERSION=
+# 20231020. Tracking HEAD instead shipped a newer core that restructured
+# ramdisk handling and added hard aborts around vendor ramdisk unpacking,
+# and on this platform the DTB lives in vendor_kernel_boot, so that new
+# code sits directly on the flash route. For scale: the reference
+# ak3-core.sh is 33634 bytes against HEAD's 35350, and they differ by
+# 1037 diff lines, the bulk of it newly added abort conditions.
+git clone https://github.com/osm0sis/AnyKernel3.git "${AK3_DIR}"
+AK3_COMMIT="$(git -C "${AK3_DIR}" rev-list -1 --before='2023-10-21T00:00:00' HEAD)"
+if [ -z "${AK3_COMMIT}" ]; then
+  echo "::error::could not resolve an AnyKernel3 commit dated before 2023-10-21"
+  exit 1
+fi
+git -C "${AK3_DIR}" checkout --quiet "${AK3_COMMIT}"
+echo "=== AnyKernel3 pinned to ${AK3_COMMIT} ==="
+
+rm -f "${AK3_DIR}/Image" "${AK3_DIR}/Image.lz4" "${AK3_DIR}/dtb"
 rm -rf "${AK3_DIR}/modules"
-cp arch/arm64/boot/Image "${AK3_DIR}/"
-mkdir -p "${AK3_DIR}/dtb"
-cp arch/arm64/boot/dts/google/*.dtb "${AK3_DIR}/dtb/" 2>/dev/null || true
+
+# Ship the kernel lz4-compressed, exactly as the reference build does --
+# a ~15 MB payload instead of a ~90 MB one. AK3 injects whichever
+# Image* it finds into the boot image, and the reference zip carries
+# Image.lz4 rather than a bare Image.
+command -v lz4 >/dev/null || { echo "::error::lz4 missing from the runner"; exit 1; }
+lz4 -9 -f arch/arm64/boot/Image "${AK3_DIR}/Image.lz4"
+
+# A single concatenated `dtb` FILE is what AK3's automatic
+# multi-partition setup keys on (`[ -f dtb -o -d vendor_ramdisk -o -d
+# vendor_patch ]`). With no such file neither branch fires, so nothing
+# reaches vendor_kernel_boot and the device tree is never flashed. An
+# empty dtb/ directory does not satisfy `-f dtb`, which is precisely the
+# state the last zip shipped in. The reference build's dtb holds four
+# blobs back to back -- verified by counting the d00dfeed magic at
+# offsets 0, 385357, 770706 and 1156923 -- so concatenate in the same
+# stable sorted order.
+printf '%s\n' "${DTB_LIST}" | xargs cat > "${AK3_DIR}/dtb"
+ls -la "${AK3_DIR}/Image.lz4" "${AK3_DIR}/dtb"
 # With CONFIG_INTEGRATE_MODULES=y (set by the zuma fragment) the device
 # drivers are built into the Image and no .ko files exist at all. Stage
 # modules only when CONFIG_MODULES=y, so a built-in build skips this
@@ -685,43 +738,51 @@ else
 fi
 
 cat > "${AK3_DIR}/anykernel.sh" << 'AKEOF'
+### AnyKernel3 Ramdisk Mod Script
+## Tensor G3 / zuma
+
 ### AnyKernel setup
-# global properties
-properties() {
-  kernel.string=Tensor G3 Kernel (zuma)
-  do.devicecheck=1
-  do.modules=0
-  do.cleanup=1
-  do.cleanuponabort=1
-  device.name1=zuma
-  device.name2=shusky
-  device.name3=husky
-  device.name4=akita
-  # NB: `tokay` was previously listed here. It is the Pixel 9, which
-  # runs Tensor G4 on the caimito platform -- not this kernel's target.
-  # do.devicecheck=1 would have accepted a flash of a G3/zuma Image onto
-  # a G4 device, which does not survive it. The three names above are
-  # the complete set of Tensor G3 Pixels: 8, 8 Pro and 8a. Adding a
-  # device here means confirming its SoC is Tensor G3 first.
-  # supported.versions is "-" (any) because AK3 cannot read the vendor
-  # build fingerprint reliably on Android 14+.
-  supported.versions=-
-}
+# begin properties
+properties() { '
+kernel.string=Tensor G3 Kernel (zuma)
+do.devicecheck=1
+do.modules=0
+do.cleanup=1
+do.cleanuponabort=1
+device.name1=zuma
+device.name2=shusky
+device.name3=husky
+device.name4=akita
+supported.versions=-
+'; } # end properties
 
-### AnyKernel install
-# boot shell variables
-BLOCK=boot;
-IS_SLOT_DEVICE=1;
-RAMDISK_COMPRESSION=auto;
-PATCH_VBMETA_FLAG=auto;
+# NB: `tokay` (Pixel 9, Tensor G4) is deliberately absent from that
+# list. do.devicecheck validates ro.product.device against those names,
+# so including it would authorise flashing a G3 Image onto a G4 device.
+# Only Tensor G3 Pixels belong there: shusky (8), husky (8 Pro),
+# akita (8a), plus zuma itself matched via ro.hardware.
+#
+# NB: the properties above MUST stay at column 0. update-binary reads
+# them with file_getprop(), which is literally
+#   grep "^$2=" anykernel.sh
+# -- anchored to the start of the line. Indenting them by even one space
+# made every single read return empty, so the device check, the version
+# check and the kernel string had all been silently inert for the whole
+# of the debugging phase.
 
-# import functions/variables and setup patching - see for reference (DO NOT REMOVE)
+# boot image installation
+block=boot;
+is_slot_device=1;
 . tools/ak3-core.sh;
+split_boot;
+flash_boot;
 
-# boot install
-dump_boot;
-write_boot;
-## end boot install
+# vendor_kernel_boot installation (for dtb)
+block=vendor_kernel_boot;
+is_slot_device=1;
+reset_ak;
+split_boot;
+flash_boot;
 AKEOF
 
 cd "${AK3_DIR}"

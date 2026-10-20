@@ -82,9 +82,13 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
+          # lz4 is required by the packaging step: AnyKernel3 ships the
+          # kernel Image compressed, and the reference build that this
+          # layout matches uses Image.lz4 rather than a raw Image.
           sudo apt-get install -y bc bison build-essential ccache cpio flex \
-            git libelf-dev libncurses5-dev libssl-dev python3-full python3-dev \
-            unzip wget zip zlib1g-dev lld gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+            git libelf-dev libncurses5-dev libssl-dev lz4 python3-full \
+            python3-dev unzip wget zip zlib1g-dev lld \
+            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
 
       - name: Install LLVM/Clang
         run: |
