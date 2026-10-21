@@ -1,0 +1,5 @@
+# The AnyKernel3 AArch64 toolset is machine code, not text.
+# Marking it explicitly keeps git from ever applying CRLF conversion to
+# an ELF header -- a corrupted e_ident would not fail any git operation,
+# it would fail silently on the phone as "Busybox setup failed".
+.github/ak3-tools/* binary

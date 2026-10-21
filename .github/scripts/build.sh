@@ -4,6 +4,13 @@ set -o pipefail
 
 BUILD_DIR="/tmp/kernel_build"
 
+# Resolve OUR repository root from this script's own location while the
+# invocation cwd is still the original one. build.sh cds into BUILD_DIR
+# early, and the kernel source is copied with `cp -r ${KERNEL_SRC_DIR}/*`
+# which skips dotfiles -- so `.github/` (where the AArch64 AnyKernel3
+# toolset lives) is unreachable from anywhere in the build tree.
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
 # Surface the real build failure as a GitHub annotation.
 # The bare "Process completed with exit code 2" is uninformative;
 # this extracts the actual failure lines from the build log so we
@@ -684,6 +691,93 @@ fi
 git -C "${AK3_DIR}" checkout --quiet "${AK3_COMMIT}"
 echo "=== AnyKernel3 pinned to ${AK3_COMMIT} ==="
 
+# ------------------------------------------------------------------------
+# 1. Replace AK3's 32-bit toolset with AArch64 binaries.
+#
+# osm0sis/AnyKernel3 builds EVERY executable in tools/ for 32-bit ARM
+# (ELFCLASS32 / EM_ARM), verified byte-for-byte against
+# osm0sis/AnyKernel3@master -- so this is upstream's own state, not
+# something our checkout did wrong. Pixel 8 / 8 Pro / 8a are Tensor G3
+# (zuma), and Google dropped 32-bit execution entirely at Tensor G3 (the
+# Pixel 8 ships "exclusively with 64-bit binaries"), so none of those
+# tools can execute at all. The flash then dies inside update-binary:
+#
+#   bb=$AKHOME/tools/busybox;  $bb --install -s bin;
+#   if [ $? != 0 -o -z "$(ls bin)" ]; then abort "Busybox setup failed"
+#
+# which is exactly the device-side "failed to initialise busybox / error 1"
+# -- and it fires before any kernel content is touched, which is why both
+# v0.1.0 and v0.2.0 died identically no matter how correct the packaging
+# around them became. update-binary is byte-identical to the reference
+# (sha256 3422BB25...), so the busybox binary was the ONLY difference in
+# that code path.
+#
+# The reference zip known to flash on this device carries an all-AArch64
+# toolset instead. Its busybox is byte-identical (sha256 C629FCE4B0DD3BA9)
+# to osm0sis' official busybox-ndk `busybox-arm64`, which is where ours is
+# taken from; the other six come from that proven zip.
+AK3_TOOLS_SRC="${REPO_ROOT}/.github/ak3-tools"
+if [ ! -d "${AK3_TOOLS_SRC}" ]; then
+  echo "::error::AArch64 AnyKernel3 toolset missing at ${AK3_TOOLS_SRC}"
+  exit 1
+fi
+cp -f "${AK3_TOOLS_SRC}/"* "${AK3_DIR}/tools/"
+chmod 755 "${AK3_DIR}"/tools/*
+echo "=== AnyKernel3 tools replaced with AArch64 ==="
+
+# Turn this entire bug class into a red build instead of a device-side
+# abort: every ELF in the toolset must be 64-bit AArch64 (e_ident[4]==2,
+# e_machine==183/0xB7). ak3-core.sh is skipped because it is not an ELF.
+for tool in "${AK3_DIR}"/tools/*; do
+  [ -f "${tool}" ] || continue
+  [ "$(od -An -tx1 -N4 "${tool}" | tr -d ' \n')" = "7f454c46" ] || continue
+  tool_class="$(od -An -tu1 -j4 -N1 "${tool}" | tr -d ' \n')"
+  tool_machine="$(od -An -tu1 -j18 -N2 "${tool}" | tr -s ' ' | awk '{ print (256 * $2) + $1 }')"
+  if [ "${tool_class}" != "2" ] || [ "${tool_machine}" != "183" ]; then
+    echo "::error::AK3 tool $(basename "${tool}") is ELF${tool_class}/machine=${tool_machine}, not AArch64 -- this 64-bit-only device cannot execute it and the flash would abort with 'Busybox setup failed'"
+    exit 1
+  fi
+  echo "  AArch64 OK: $(basename "${tool}")"
+done
+
+# ------------------------------------------------------------------------
+# 2. Slot-detection fallback, matching the reference zip exactly.
+#
+# anykernel.sh sets is_slot_device=1, and setup_ak() in ak3-core.sh turns
+# an undetected slot into a HARD abort ("Unable to determine active
+# slot. Aborting..."). Stock AK3 only tries getprop and /proc/cmdline,
+# but newer Pixels pass androidboot.slot_suffix through /proc/bootconfig
+# instead. The proven reference carries this extra guarded fallback --
+# with it applied our ak3-core.sh becomes byte-identical to that file
+# (sha256 0767a6b0d9ca1656). It only runs when getprop and cmdline both
+# came up empty.
+if ! grep -q '/proc/bootconfig' "${AK3_DIR}/tools/ak3-core.sh"; then
+  if ! bash -n "${AK3_DIR}/tools/ak3-core.sh"; then
+    echo "::error::ak3-core.sh does not parse before patching"
+    exit 1
+  fi
+  # The anchor must match ONLY the bare `androidboot.slot=` line: the
+  # `androidboot.slot_suffix=` lines cannot match because `slot` is
+  # followed by `_`, not `=`. Verified against a fixture before shipping.
+  SLOT_LINE="$(grep -n 'androidboot\.slot=' "${AK3_DIR}/tools/ak3-core.sh" | head -n1 | cut -d: -f1 || true)"
+  if [ -z "${SLOT_LINE}" ]; then
+    echo "::error::could not locate the slot-detection line in ak3-core.sh"
+    exit 1
+  fi
+  cat > /tmp/ak3-bootconfig-fallback << 'SLOTEOF'
+        [ "$slot" ] || slot=$(grep -o 'androidboot.slot_suffix = ".*"$' /proc/bootconfig | cut -d '"' -f2 | cut -c 2);
+SLOTEOF
+  # `sed N r file` appends file contents after line N -- deliberately
+  # chosen over an inline sed replacement to avoid fighting with the $(),
+  # single quotes and double quotes the replacement line is full of.
+  sed -i "${SLOT_LINE}r /tmp/ak3-bootconfig-fallback" "${AK3_DIR}/tools/ak3-core.sh"
+  if ! bash -n "${AK3_DIR}/tools/ak3-core.sh" || ! grep -q '/proc/bootconfig' "${AK3_DIR}/tools/ak3-core.sh"; then
+    echo "::error::bootconfig slot fallback did not apply cleanly to ak3-core.sh"
+    exit 1
+  fi
+  echo "=== ak3-core.sh: bootconfig slot fallback applied after line ${SLOT_LINE} ==="
+fi
+
 rm -f "${AK3_DIR}/Image" "${AK3_DIR}/Image.lz4" "${AK3_DIR}/dtb"
 rm -rf "${AK3_DIR}/modules"
 
@@ -750,17 +844,27 @@ do.modules=0
 do.cleanup=1
 do.cleanuponabort=1
 device.name1=zuma
-device.name2=shusky
-device.name3=husky
-device.name4=akita
+device.name2=shiba
+device.name3=shusky
+device.name4=husky
+device.name5=akita
 supported.versions=-
 '; } # end properties
 
 # NB: `tokay` (Pixel 9, Tensor G4) is deliberately absent from that
-# list. do.devicecheck validates ro.product.device against those names,
-# so including it would authorise flashing a G3 Image onto a G4 device.
-# Only Tensor G3 Pixels belong there: shusky (8), husky (8 Pro),
-# akita (8a), plus zuma itself matched via ro.hardware.
+# list. do_devicecheck() in update-binary compares each name with an
+# EXACT `==` against four properties (ro.product.device, ro.build.product,
+# ro.product.vendor.device, ro.vendor.product.device), so including tokay
+# would authorise flashing a G3 Image onto a G4 device. Only Tensor G3
+# Pixels belong there: shiba (Pixel 8), husky (Pixel 8 Pro), akita
+# (Pixel 8a).
+#
+# NB: `shiba` was missing until now -- the list read zuma/shusky/husky/
+# akita, and `shusky` is the shared source-tree name for the shiba/husky
+# pair, never a retail property value. Because do_devicecheck aborts with
+# "Unsupported device" on no match, every plain Pixel 8 would have been
+# refused. `zuma` (the Tensor G3 SoC name) and `shusky` are kept: an
+# exact match can only ever widen to another G3 name, never to a G4 one.
 #
 # NB: the properties above MUST stay at column 0. update-binary reads
 # them with file_getprop(), which is literally
