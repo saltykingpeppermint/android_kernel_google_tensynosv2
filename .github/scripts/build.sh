@@ -785,8 +785,33 @@ rm -rf "${AK3_DIR}/modules"
 # a ~15 MB payload instead of a ~90 MB one. AK3 injects whichever
 # Image* it finds into the boot image, and the reference zip carries
 # Image.lz4 rather than a bare Image.
+#
+# The `-l` is NOT optional. The lz4 CLI defaults to the LZ4 *Frame*
+# container (magic 04 22 4D 18) and `-l` selects the LZ4 *Legacy*
+# container (magic 02 21 4C 18). Those are genuinely different formats,
+# and Legacy is the only one this pipeline is otherwise known to produce:
+# scripts/Makefile.lib in the kernel defines
+#
+#     cmd_lz4 = cat $(real-prereqs) | $(LZ4) -l -9 - - > $@
+#
+# and the reference zip's Image.lz4 was verified to begin 02 21 4C 18,
+# i.e. Legacy, consistent with that. Emitting Frame here would hand the
+# bootloader a container format nothing else in the chain emits, and its
+# failure mode -- bootloader unable to decompress the kernel -- is a
+# silent no-boot that no amount of flash-side logging would explain.
+# `-9` matches the kernel's own compression level.
 command -v lz4 >/dev/null || { echo "::error::lz4 missing from the runner"; exit 1; }
-lz4 -9 -f arch/arm64/boot/Image "${AK3_DIR}/Image.lz4"
+lz4 -l -9 -f arch/arm64/boot/Image "${AK3_DIR}/Image.lz4"
+
+# Convert a wrong container format into a RED build rather than a device
+# that silently refuses to boot. od -An -tx1 -N4 reads the first four
+# bytes; Legacy is 0x184C2102 stored little-endian, i.e. 02 21 4c 18.
+LZ4_MAGIC=$(od -An -tx1 -N4 "${AK3_DIR}/Image.lz4" | tr -d ' \n')
+if [ "${LZ4_MAGIC}" != "02214c18" ]; then
+  echo "::error::Image.lz4 is not LZ4 Legacy (magic ${LZ4_MAGIC}, expected 02 21 4c 18); the bootloader would not decompress it"
+  exit 1
+fi
+echo "=== Image.lz4 LZ4 Legacy format confirmed (magic ${LZ4_MAGIC}) ==="
 
 # A single concatenated `dtb` FILE is what AK3's automatic
 # multi-partition setup keys on (`[ -f dtb -o -d vendor_ramdisk -o -d
