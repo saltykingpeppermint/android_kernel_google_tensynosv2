@@ -848,7 +848,7 @@ device.name2=shiba
 device.name3=shusky
 device.name4=husky
 device.name5=akita
-supported.versions=-
+supported.versions=14-17
 '; } # end properties
 
 # NB: `tokay` (Pixel 9, Tensor G4) is deliberately absent from that
@@ -865,6 +865,19 @@ supported.versions=-
 # "Unsupported device" on no match, every plain Pixel 8 would have been
 # refused. `zuma` (the Tensor G3 SoC name) and `shusky` are kept: an
 # exact match can only ever widen to another G3 name, never to a G4 one.
+#
+# NB: `supported.versions` used to read `-`, and that is NOT a wildcard.
+# do_versioncheck() in update-binary tests the value with `grep -q '-'`
+# (line 329) and, on any hit, parses it as a lo-hi RANGE via `cut -d- -f1`
+# and `-f2`. A bare `-` has nothing on either side of the dash, so both
+# halves come out empty; int2ver() then renders each as ".0", yielding the
+# impossible range [.0, .0] -- which rejects every Android release and
+# aborts with "Unsupported Android version". Note only the ABSENCE of the
+# property skips the check (line 323, `|| return 1`), which is why the
+# proven reference zip omits it entirely. A written range must be lo-hi,
+# so 14-17 admits Android 14 through 17 inclusive. The range is deliberately
+# wide because a custom ROM's reported release is not knowable in advance,
+# and re-aborting on version would cost another flash cycle to discover.
 #
 # NB: the properties above MUST stay at column 0. update-binary reads
 # them with file_getprop(), which is literally
