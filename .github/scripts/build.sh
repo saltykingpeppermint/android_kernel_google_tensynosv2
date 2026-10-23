@@ -369,6 +369,80 @@ if [ -f "${ET_KB}" ] && grep -q 'ifdef[[:space:]]*CONFIG_EDGETPU_TELEMETRY_TRACE
 fi
 grep -n -B1 -A2 'edgetpu-trace\.o' "${ET_KB}" 2>/dev/null || true
 
+# Build the two gcip drivers as genuine built-in objects.
+#
+# google-modules/Makefile force-links them into vmlinux whenever
+# CONFIG_SOC_ZUMA is set, naming the object paths directly:
+#
+#   ifdef CONFIG_SOC_ZUMA
+#   gcip-drivers := \
+#   	edgetpu/rio/drivers/edgetpu/rio.o \
+#   	gxp/zuma/gxp.o
+#   obj-y += $(gcip-drivers)
+#
+# but each driver's own Kbuild declares itself a module:
+#
+#   edgetpu/rio/drivers/edgetpu/Kbuild:15  obj-$(CONFIG_RIO) += rio.o
+#   gxp/zuma/Makefile:20                   obj-$(CONFIG_$(GXP_CHIP)) += gxp.o
+#
+# An object listed in its own directory's obj-m is compiled with
+# KBUILD_CFLAGS_MODULE = -DMODULE (top-level Makefile:616, selected by
+# the `part-of-module` test in scripts/Makefile.lib:232-238). While
+# CONFIG_INTEGRATE_MODULES=y that was harmless: include/linux/module.h:81
+# took the first branch and module_init() became a per-module initcall
+# with a unique section name. INTEGRATE_MODULES must now be off --
+# MODULES depends on !INTEGRATE_MODULES, and CONFIG_MODULES=y is itself
+# required for this kernel to boot -- so module.h:145-152 applies
+# instead and defines the plain loadable-module aliases:
+#
+#   int   init_module(void)   __copy(initfn) __attribute__((alias(#initfn)));
+#   void  cleanup_module(void) __copy(exitfn) __attribute__((alias(#exitfn)));
+#
+# Two such objects inside vmlinux.a collide at the final link:
+#
+#   ld.lld: error: duplicate symbol: init_module
+#   >>> defined at rio-platform.c:45       rio.o:(init_module)
+#   >>> defined at callisto-platform.c:168 gxp.o:(.init.text+0x4)
+#   ld.lld: error: duplicate symbol: cleanup_module
+#
+# That branch emits NO __initcall at all, so even if it had linked,
+# neither driver would ever have been initialised. Declaring both
+# obj-y drops -DMODULE from their cflags and makes module_init()
+# expand to __initcall() (module.h:102), the normal built-in path.
+#
+# Parent linkage is untouched: google-modules/Makefile lists the object
+# paths, not the directories, so only the compile flags change and
+# nothing is added to vmlinux twice.
+GCIP_KB="google-modules/edgetpu/rio/drivers/edgetpu/Kbuild"
+GCIP_MK="google-modules/gxp/zuma/Makefile"
+if [ ! -f "${GCIP_KB}" ]; then
+  echo "::error::${GCIP_KB} not found; cannot drop -DMODULE from rio.o"
+  exit 1
+fi
+if [ ! -f "${GCIP_MK}" ]; then
+  echo "::error::${GCIP_MK} not found; cannot drop -DMODULE from gxp.o"
+  exit 1
+fi
+if grep -qE '^[[:space:]]*obj-\$\(CONFIG_RIO\)[[:space:]]*\+=[[:space:]]*rio\.o[[:space:]]*$' "${GCIP_KB}"; then
+  echo "=== rio.o: obj-\$(CONFIG_RIO) -> obj-y (built-in, no -DMODULE) ==="
+  sed -E 's|^[[:space:]]*obj-\$\(CONFIG_RIO\)[[:space:]]*\+=[[:space:]]*rio\.o[[:space:]]*$|obj-y\t+= rio.o|' \
+       "${GCIP_KB}" > "${GCIP_KB}.tmp" && mv "${GCIP_KB}.tmp" "${GCIP_KB}"
+fi
+if grep -qE '^[[:space:]]*obj-\$\(CONFIG_\$\(GXP_CHIP\)\)[[:space:]]*\+=[[:space:]]*gxp\.o[[:space:]]*$' "${GCIP_MK}"; then
+  echo "=== gxp.o: obj-\$(CONFIG_\$(GXP_CHIP)) -> obj-y (built-in, no -DMODULE) ==="
+  sed -E 's|^[[:space:]]*obj-\$\(CONFIG_\$\(GXP_CHIP\)\)[[:space:]]*\+=[[:space:]]*gxp\.o[[:space:]]*$|obj-y\t+= gxp.o|' \
+       "${GCIP_MK}" > "${GCIP_MK}.tmp" && mv "${GCIP_MK}.tmp" "${GCIP_MK}"
+fi
+if ! grep -qE '^[[:space:]]*obj-y[[:space:]]*\+=[[:space:]]*rio\.o[[:space:]]*$' "${GCIP_KB}"; then
+  echo "::error::rio.o is not obj-y; final link would hit 'duplicate symbol: init_module'"
+  exit 1
+fi
+if ! grep -qE '^[[:space:]]*obj-y[[:space:]]*\+=[[:space:]]*gxp\.o[[:space:]]*$' "${GCIP_MK}"; then
+  echo "::error::gxp.o is not obj-y; final link would hit 'duplicate symbol: init_module'"
+  exit 1
+fi
+grep -nE '^[[:space:]]*obj-(y|m|\$\(CONFIG)' "${GCIP_KB}" "${GCIP_MK}" || true
+
 # Apply build configs
 if [ "${ENABLE_KSU}" = "true" ]; then
   if ! grep -q "CONFIG_KSU=y" build.config.common; then
