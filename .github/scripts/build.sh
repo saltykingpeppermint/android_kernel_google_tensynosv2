@@ -397,6 +397,100 @@ make O= may-sync-config= gki-stock_defconfig
 # enough to keep the choice on it.
 ./scripts/config --file .config --enable ARM64_MTE
 
+# ---------------------------------------------------------------------------
+# Restore what the fragment cancels. Same root cause as LTO_GCC and ARM64_MTE
+# above, but this is the one that actually stopped the phone from booting.
+#
+# zuma_defconfig carries 128 explicit "# CONFIG_* is not set" lines. Most are
+# harmless vendor trimming, but a set of them cancel options the base config
+# needs to come up at all. Confirmed against the config embedded in the
+# reference kernel (IKCONFIG), which is byte-identical to gki-stock_defconfig
+# (sha256 0cf99b902a50...):
+#
+#   fragment                          reference     effect of cancelling it
+#   --------------------------------  -----------   ------------------------
+#   # CONFIG_RD_GZIP is not set       =y            CANNOT UNPACK A GZIP
+#                                                   RAMDISK
+#   # CONFIG_RD_ZSTD is not set       =y            cannot unpack zstd
+#   (DECOMPRESS_GZIP never set)       =y            no gzip *library* either
+#   # CONFIG_VMAP_STACK is not set    =y            stacks in linear map, no
+#                                                   guard pages
+#   # CONFIG_ZONE_DMA32 is not set    =y            no lowmem DMA zone
+#   # CONFIG_UNMAP_KERNEL_AT_EL0...   =y            no KPTI
+#   # CONFIG_SLUB_CPU_PARTIAL ...     =y            different allocator path
+#   18 x ARM64_ERRATUM_* ...          =y            silicon workarounds off
+#
+# RD_GZIP is the smoking gun for the observed symptom, and it explains why
+# four separate flash cycles failed identically while KASAN and lz4 fixes
+# changed the failure mode but never the outcome:
+#
+#   Pixel boot images store the ramdisk gzip-compressed. AK3 unpacks it with
+#   magiskboot, patches, and repacks it -- still gzip. On the next boot the
+#   kernel's init/initramfs.c calls unpack_to_rootfs(), which dispatches on
+#   the compression magic via lib/decompress.c. With CONFIG_RD_GZIP unset
+#   there is no gzip handler, the archive fails to unpack, no /init ever
+#   materialises, and the kernel panics with a working console. The
+#   bootloader had already drawn its logo by then, so what you see is:
+#   Google logo, black screen, reboot. No flash error, because nothing in
+#   the flash path is wrong -- the kernel simply cannot read its own
+#   rootfs. We kept only RD_LZ4 (zuma_defconfig does not cancel it), which
+#   is why every build looked plausible and still died.
+#
+# Restoring these to the reference's values is not an experiment: it is
+# returning to the exact configuration a known-good kernel shipped with.
+# The errata are set unconditionally -- the fragment cancels all 18, and
+# several (1165522, 1530923, 1542419) cover the A510/A715 cores this SoC
+# actually uses. The generic-vendor ones that only matter on Cavium,
+# HiSilicon or Qualcomm silicon cost a few instructions and are left at the
+# reference's value rather than cherry-picked.
+./scripts/config --file .config --enable RD_GZIP \
+  --enable RD_ZSTD \
+  --enable DECOMPRESS_GZIP \
+  --enable DECOMPRESS_ZSTD \
+  --enable VMAP_STACK \
+  --enable ZONE_DMA32 \
+  --enable UNMAP_KERNEL_AT_EL0 \
+  --enable SLUB_CPU_PARTIAL \
+  --enable SLUB_DEBUG \
+  --enable CPU_ISOLATION \
+  --enable GENERIC_IRQ_EFFECTIVE_AFF_MASK \
+  --enable GKI_HACKS_TO_FIX \
+  --enable ANDROID_ARM64_WORKAROUND_DMA_BEYOND_POC \
+  --enable ARM_ARCH_TIMER_OOL_WORKAROUND \
+  --enable ARM64_WORKAROUND_CLEAN_CACHE \
+  --enable ARM64_WORKAROUND_SPECULATIVE_AT \
+  --enable ARM64_WORKAROUND_TSB_FLUSH_FAILURE \
+  --enable ARM64_ERRATUM_819472 \
+  --enable ARM64_ERRATUM_824069 \
+  --enable ARM64_ERRATUM_826319 \
+  --enable ARM64_ERRATUM_827319 \
+  --enable ARM64_ERRATUM_832075 \
+  --enable ARM64_ERRATUM_834220 \
+  --enable ARM64_ERRATUM_843419 \
+  --enable ARM64_ERRATUM_858921 \
+  --enable ARM64_ERRATUM_1024718 \
+  --enable ARM64_ERRATUM_1286807 \
+  --enable ARM64_ERRATUM_1319367 \
+  --enable ARM64_ERRATUM_1463225 \
+  --enable ARM64_ERRATUM_1508412 \
+  --enable ARM64_ERRATUM_1165522 \
+  --enable ARM64_ERRATUM_1530923 \
+  --enable ARM64_ERRATUM_1542419 \
+  --enable ARM64_ERRATUM_2054223 \
+  --enable ARM64_ERRATUM_2067961 \
+  --enable ARM_PSCI_CPUIDLE_DOMAIN \
+  --enable CPU_FREQ_DEFAULT_GOV_SCHEDUTIL \
+  --disable CC_OPTIMIZE_FOR_PERFORMANCE_O3 \
+  --enable CC_OPTIMIZE_FOR_PERFORMANCE
+
+# Optimization level. zuma_defconfig asks for CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE_O3
+# (=y); gki-stock_defconfig and the reference both use plain -O2. -O3 turns on
+# loop vectorisation and aggressive inlining that the kernel is not audited
+# for, and it inflates .text enough to account for a good part of our 63 MB
+# Image against the reference's 45 MB. Note this is a *choice*, so disabling
+# O3 without enabling PERFORMANCE would leave it unresolved -- both are set
+# above in one call for that reason.
+
 # Gunyah is Qualcomm's type-1 hypervisor. It arrives via the generic GKI
 # base (gki-stock_defconfig sets CONFIG_GUNYAH=y) and zuma_defconfig
 # never mentions it, so it is not part of what this device actually
@@ -581,6 +675,65 @@ if grep -q '^CONFIG_KASAN_GENERIC=y' .config; then
   echo "::error::CONFIG_KASAN_GENERIC re-enabled; ~2x kernel size and early-boot shadow mapping"
   exit 1
 fi
+# Boot-critical options the fragment cancels. RD_GZIP is the one that
+# actually killed every flash attempt: the Pixel ramdisk is gzip, and with
+# no gzip decompressor the kernel cannot unpack its own initramfs, so it
+# panics after the bootloader has already drawn the logo -- black screen,
+# then reboot, with no error anywhere in the flash path. Verifying it here
+# costs a grep; discovering it on-device costs a flash cycle and a slot
+# swap. RD_GZIP/RD_ZSTD are dependencies of the decompress library
+# symbols, so those are checked too.
+if ! grep -q '^CONFIG_RD_GZIP=y' .config; then
+  echo "::error::CONFIG_RD_GZIP lost; kernel cannot unpack a gzip initramfs and will panic after the boot logo"
+  exit 1
+fi
+if ! grep -q '^CONFIG_RD_ZSTD=y' .config; then
+  echo "::error::CONFIG_RD_ZSTD lost; kernel cannot unpack a zstd initramfs"
+  exit 1
+fi
+if ! grep -q '^CONFIG_DECOMPRESS_GZIP=y' .config; then
+  echo "::error::CONFIG_DECOMPRESS_GZIP lost; no gzip decompression library to back RD_GZIP"
+  exit 1
+fi
+# -O3: zuma_defconfig's CC_OPTIMIZE_FOR_PERFORMANCE_O3 must not come back.
+# olddefconfig resolves the optimization *choice*, so both halves are
+# verified rather than just one.
+if grep -q '^CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE_O3=y' .config; then
+  echo "::error::CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE_O3 re-enabled; -O3 is not what the reference kernel builds with"
+  exit 1
+fi
+if ! grep -q '^CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y' .config; then
+  echo "::error::CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE lost; optimization choice unresolved"
+  exit 1
+fi
+# Memory/stack protections the fragment cancels. None of these are the
+# boot blocker, but the reference has all of them and there is no reason
+# to ship without them.
+for sym in VMAP_STACK ZONE_DMA32 UNMAP_KERNEL_AT_EL0; do
+  if ! grep -q "^CONFIG_${sym}=y" .config; then
+    echo "::error::CONFIG_${sym} lost; the reference kernel has it enabled and zuma_defconfig cancels it"
+    exit 1
+  fi
+done
+# Silicon errata workarounds. The fragment cancels all 18 that
+# gki-stock_defconfig enables; 1165522, 1530923 and 1542419 cover the
+# A510/A715 cores Tensor G3 actually uses. Spot-check those three rather
+# than all 18 -- if the mechanism works for them it works for the rest.
+for sym in ARM64_ERRATUM_1165522 ARM64_ERRATUM_1530923 ARM64_ERRATUM_1542419; do
+  if ! grep -q "^CONFIG_${sym}=y" .config; then
+    echo "::error::CONFIG_${sym} lost; zuma_defconfig cancels an errata workaround for this SoC's cores"
+    exit 1
+  fi
+done
+# Sanity: the required user-facing feature must still be present. It is
+# not in any defconfig -- it is enabled through the KCONFIG_EXT_ZUMA path,
+# so this also proves that path stayed intact.
+for sym in BLUETOOTH_POWERSAVE_EXCLUDE WIFI_POWERSAVE_EXCLUDE; do
+  if ! grep -q "^CONFIG_${sym}=y" .config; then
+    echo "::error::CONFIG_${sym} lost; this is the required BT/WiFi power-save exclusion feature"
+    exit 1
+  fi
+done
 echo "=== =m symbols (modules; informational) ==="
 grep -c '=m$' .config || true
 
