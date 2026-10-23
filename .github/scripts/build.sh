@@ -363,6 +363,40 @@ make O= may-sync-config= gki-stock_defconfig
 # gki-stock_defconfig and Google's own clang build use.
 ./scripts/config --file .config --disable LTO_GCC
 
+# zuma_defconfig also carries `# CONFIG_ARM64_MTE is not set`, which the
+# merge above applies over gki-stock_defconfig's CONFIG_ARM64_MTE=y. This
+# is the same fragment-cancels-base bug as LTO_GCC, but with a far larger
+# blast radius, because of this chain:
+#
+#   arch/arm64/Kconfig:163
+#     select HAVE_ARCH_KASAN_HW_TAGS if (HAVE_ARCH_KASAN && ARM64_MTE)
+#   lib/Kconfig.kasan:106-108
+#     config KASAN_HW_TAGS ... depends on HAVE_ARCH_KASAN_HW_TAGS
+#
+# With ARM64_MTE off the select never fires, so HAVE_ARCH_KASAN_HW_TAGS
+# vanishes (that is why it appears as an implicit casualty in a base-vs-
+# final config diff), KASAN_HW_TAGS drops out of the KASAN choice
+# entirely, and olddefconfig resolves the choice to its default instead:
+# CONFIG_KASAN_GENERIC=y.
+#
+# That swap is not cosmetic:
+#
+#   KASAN_HW_TAGS   tag checks done in hardware by MTE, near-zero cost.
+#                   Both gki-stock_defconfig and Google's own
+#                   gki_defconfig ask for CONFIG_KASAN=y +
+#                   CONFIG_KASAN_HW_TAGS=y, so HW_TAGS is the mode this
+#                   tree is meant to build.
+#   KASAN_GENERIC  software instrumentation on every memory access, plus
+#                   a shadow region covering 1/8 of RAM that must be
+#                   mapped before the kernel can print a single line.
+#
+# It is also what doubled the kernel: 92.5 MB uncompressed Image and a
+# 35 MB Image.lz4 against the reference build's 16 MB Image.lz4, the
+# filesize gap that first exposed this. HW_TAGS is still =y in the merged
+# file -- the fragment never mentions it -- so restoring its dependency is
+# enough to keep the choice on it.
+./scripts/config --file .config --enable ARM64_MTE
+
 # Gunyah is Qualcomm's type-1 hypervisor. It arrives via the generic GKI
 # base (gki-stock_defconfig sets CONFIG_GUNYAH=y) and zuma_defconfig
 # never mentions it, so it is not part of what this device actually
@@ -529,6 +563,23 @@ if [ "${ENABLE_KSU}" = "true" ]; then
     echo "::error::CONFIG_KSU did not survive olddefconfig"
     exit 1
   fi
+fi
+# KASAN mode. If ARM64_MTE is gone, HAVE_ARCH_KASAN_HW_TAGS cannot be
+# selected and the KASAN choice silently resolves to software GENERIC --
+# roughly 2x the kernel size and a shadow mapping over 1/8 of RAM before
+# the first console line. That is a 30-minute build to discover here, and
+# it already shipped once as the 92.5 MB Image. Fail at config time.
+if ! grep -q '^CONFIG_ARM64_MTE=y' .config; then
+  echo "::error::CONFIG_ARM64_MTE did not survive olddefconfig; HAVE_ARCH_KASAN_HW_TAGS cannot be selected"
+  exit 1
+fi
+if ! grep -q '^CONFIG_KASAN_HW_TAGS=y' .config; then
+  echo "::error::CONFIG_KASAN_HW_TAGS lost; kernel would build in software KASAN_GENERIC instead of the hardware tag mode both defconfigs ask for"
+  exit 1
+fi
+if grep -q '^CONFIG_KASAN_GENERIC=y' .config; then
+  echo "::error::CONFIG_KASAN_GENERIC re-enabled; ~2x kernel size and early-boot shadow mapping"
+  exit 1
 fi
 echo "=== =m symbols (modules; informational) ==="
 grep -c '=m$' .config || true
