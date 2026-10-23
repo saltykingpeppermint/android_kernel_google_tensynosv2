@@ -112,6 +112,60 @@ if ! grep -q "BLUETOOTH_POWERSAVE_EXCLUDE" google-devices/zuma/Kconfig.ext.zuma;
   printf '\nconfig BLUETOOTH_POWERSAVE_EXCLUDE\n  bool "Exclude Bluetooth from power saving"\n  default y\n\nconfig WIFI_POWERSAVE_EXCLUDE\n  bool "Exclude WiFi from power saving"\n  default y\n' >> google-devices/zuma/Kconfig.ext.zuma
 fi
 
+# ---------------------------------------------------------------------------
+# Wire init/Kconfig.gki back into the Kconfig tree.
+#
+# init/Kconfig.gki is where Google defines CONFIG_GKI_HACKS_TO_FIX and the 22
+# CONFIG_GKI_HIDDEN_* umbrellas it selects. In this tree its source line ships
+# commented out, with nothing above it to say why:
+#
+#     2067: #source "init/Kconfig.gki"
+#
+# Kconfig therefore has never heard of any of those symbols, and that single
+# '#' accounts for every "plumbing" config that was found missing when our
+# .config was diffed against the config extracted from the known-booting ROM
+# (extract_ikconfig on boot.img.kernel.lz4):
+#
+#   * gki-stock_defconfig sets CONFIG_GKI_HACKS_TO_FIX=y, so
+#     `make gki-stock_defconfig` writes the line -- and the first olddefconfig
+#     deletes it again as a symbol Kconfig does not know. The
+#     `--enable GKI_HACKS_TO_FIX` further down met exactly the same fate, which
+#     is why it sat in build.sh while remaining absent from every shipped zip.
+#
+#   * With the umbrella gone, nothing selects the helpers underneath it, and
+#     those helpers have no prompt, so they cannot be switched on from the
+#     command line either -- olddefconfig recomputes them from their (absent)
+#     selects and drops them:
+#
+#       GKI_HIDDEN_DRM_CONFIGS    -> DRM_TTM, DRM_GEM_SHMEM_HELPER,
+#                                    DRM_MIPI_DSI, DRM_KMS_HELPER,
+#                                    VIDEOMODE_HELPERS, INTERVAL_TREE
+#       GKI_HIDDEN_PHY_CONFIGS    -> GENERIC_PHY_MIPI_DPHY  (MIPI DSI D-PHY)
+#       GKI_HIDDEN_MEDIA_CONFIGS  -> CEC_CORE / CEC_NOTIFIER / CEC_PIN
+#       GKI_HIDDEN_CRYPTO/RPMSG/USB/NET/IRQ/SND/MMC/GPIO/... -> CRYPTO_ENGINE,
+#                                    RPMSG, USB_PHY, NET_DEVLINK, PHYLINK, ...
+#
+# The help text of GKI_HIDDEN_DRM_CONFIGS describes our exact situation:
+#
+#     "These are normally selected implicitly when including a DRM module, but
+#      for GKI, the modules are built out-of-tree."
+#
+# The Pixel's display driver ships in vendor_dlkm as a .ko compiled out of
+# tree against a kernel that HAS all of this, so a kernel missing it cannot
+# satisfy that module's symbols when Android goes to load it. The ROM's own
+# config carries zero Samsung display symbols for the same reason -- DRM_TTM
+# and friends are the in-kernel half of the contract.
+#
+# This must happen before the first `make`, because that is the first point at
+# which Kconfig is parsed. Idempotent: it only fires on the commented form.
+if grep -qE '^[[:space:]]*#source[[:space:]]+"init/Kconfig\.gki"' init/Kconfig; then
+  sed -i 's|^[[:space:]]*#source[[:space:]]*"init/Kconfig\.gki"|source "init/Kconfig.gki"|' init/Kconfig
+fi
+if ! grep -qE '^[[:space:]]*source[[:space:]]+"init/Kconfig\.gki"' init/Kconfig; then
+  echo "::error::init/Kconfig.gki is not sourced; CONFIG_GKI_HACKS_TO_FIX and CONFIG_GKI_HIDDEN_* would be dropped from .config and the vendor display module could not link against the kernel"
+  exit 1
+fi
+
 # Copy modified source files from our repo
 cp "${OUR_REPO_DIR}/google-modules/bluetooth/broadcom/nitrous.c" \
    google-modules/bluetooth/broadcom/nitrous.c
@@ -399,7 +453,21 @@ make O= may-sync-config= gki-stock_defconfig
 
 # ---------------------------------------------------------------------------
 # Restore what the fragment cancels. Same root cause as LTO_GCC and ARM64_MTE
-# above, but this is the one that actually stopped the phone from booting.
+# above.
+#
+# WHAT ACTUALLY STOPPED THE BOOT -- recorded here so the RD_GZIP theory further
+# down is not mistaken for the diagnosis again. Every entry in this table is a
+# real gap and worth closing, but none of them was the blocker. RD_GZIP was
+# restored in v0.2.5 (CONFIG_RD_GZIP=y, CONFIG_RD_ZSTD=y,
+# CONFIG_DECOMPRESS_GZIP=y) and the phone still looped on the Google logo
+# identically. The two things that did block boot are handled elsewhere in this
+# script:
+#
+#   * CONFIG_INTEGRATE_MODULES=y in zuma_defconfig, which switches
+#     CONFIG_MODULES off entirely -- see the block immediately above
+#     `olddefconfig`; and
+#   * init/Kconfig.gki shipping with its source line commented out -- see the
+#     edit near the top of this file.
 #
 # zuma_defconfig carries 128 explicit "# CONFIG_* is not set" lines. Most are
 # harmless vendor trimming, but a set of them cancel options the base config
@@ -420,21 +488,15 @@ make O= may-sync-config= gki-stock_defconfig
 #   # CONFIG_SLUB_CPU_PARTIAL ...     =y            different allocator path
 #   18 x ARM64_ERRATUM_* ...          =y            silicon workarounds off
 #
-# RD_GZIP is the smoking gun for the observed symptom, and it explains why
-# four separate flash cycles failed identically while KASAN and lz4 fixes
-# changed the failure mode but never the outcome:
-#
-#   Pixel boot images store the ramdisk gzip-compressed. AK3 unpacks it with
-#   magiskboot, patches, and repacks it -- still gzip. On the next boot the
-#   kernel's init/initramfs.c calls unpack_to_rootfs(), which dispatches on
-#   the compression magic via lib/decompress.c. With CONFIG_RD_GZIP unset
-#   there is no gzip handler, the archive fails to unpack, no /init ever
-#   materialises, and the kernel panics with a working console. The
-#   bootloader had already drawn its logo by then, so what you see is:
-#   Google logo, black screen, reboot. No flash error, because nothing in
-#   the flash path is wrong -- the kernel simply cannot read its own
-#   rootfs. We kept only RD_LZ4 (zuma_defconfig does not cancel it), which
-#   is why every build looked plausible and still died.
+# Why RD_GZIP belongs in this table even though it was not the diagnosis.
+# Pixel boot images store the ramdisk gzip-compressed. AK3 unpacks it with
+# magiskboot, patches, and repacks it -- still gzip. On the next boot the
+# kernel's init/initramfs.c calls unpack_to_rootfs(), which dispatches on the
+# compression magic via lib/decompress.c, so a kernel with CONFIG_RD_GZIP
+# unset has no gzip handler and cannot unpack its own rootfs at all. That is a
+# genuine hole for a flashable zip to have; it simply was not the one that had
+# been closing the loop. (RD_LZ4 was never affected -- zuma_defconfig does not
+# cancel it -- which is why every build looked plausible and still died.)
 #
 # Restoring these to the reference's values is not an experiment: it is
 # returning to the exact configuration a known-good kernel shipped with.
@@ -494,10 +556,14 @@ make O= may-sync-config= gki-stock_defconfig
 # Gunyah is Qualcomm's type-1 hypervisor. It arrives via the generic GKI
 # base (gki-stock_defconfig sets CONFIG_GUNYAH=y) and zuma_defconfig
 # never mentions it, so it is not part of what this device actually
-# builds. With INTEGRATE_MODULES=y forcing MODULES=n it becomes a hard
-# failure rather than dead weight: drivers/virt/gunyah/vm_mgr.c:182
-# calls module_refcount(), which is only declared under CONFIG_MODULES,
-# and clang 17 promotes the implicit declaration to an error.
+# builds. It used to be a hard failure rather than dead weight:
+# drivers/virt/gunyah/vm_mgr.c:182 calls module_refcount(), which is only
+# declared under CONFIG_MODULES, and clang 17 promotes the implicit
+# declaration to an error -- so this was switched off while INTEGRATE_MODULES
+# was still forcing MODULES=n. Restoring CONFIG_MODULES below removes that
+# particular reason, but Gunyah is a Qualcomm hypervisor that Tensor never
+# probes, so it stays off: no Pixel module can reference it and nothing is
+# gained by compiling it in.
 ./scripts/config --file .config --disable GUNYAH
 
 # vclk.h chooses between real prototypes and static inline stubs with
@@ -609,6 +675,52 @@ if [ "${ENABLE_KSU}" = "true" ]; then
   ./scripts/config --file .config --enable KSU --enable KPROBES --enable EXT4_FS
 fi
 
+# ---------------------------------------------------------------------------
+# Put module loading back on. THIS is what stopped the phone from booting.
+#
+# zuma_defconfig line 119 sets CONFIG_INTEGRATE_MODULES=y, and in
+# kernel/module/Kconfig that option is a hard blocker for module support:
+#
+#     25: menuconfig MODULES
+#     26:     bool "Enable loadable module support"
+#     27:     depends on !INTEGRATE_MODULES
+#
+# MODULES is therefore not merely cancelled by the fragment -- it never becomes
+# visible, so the line is absent from .config altogether (not even
+# "# CONFIG_MODULES is not set"), and it takes its whole menu with it:
+# MODULE_UNLOAD, MODVERSIONS, MODULE_SIG, KPROBES and everything under
+# `if MODULES` are gone too. The known-booting ROM's IKCONFIG has
+# CONFIG_MODULES=y at line 788.
+#
+# What that does to the device, step by step:
+#
+#   1. The bootloader draws the Google logo before the kernel is entered, so
+#      the logo itself proves nothing about the kernel.
+#   2. The kernel starts with CONFIG_MODULES absent. Android's init calls
+#      finit_module() for the drivers in vendor_dlkm; every one of those calls
+#      fails immediately because the syscall does not exist.
+#   3. The Samsung display panel driver is one of those vendor_dlkm modules --
+#      neither the ROM's config nor the reference config contains a single
+#      Samsung display symbol (DRM_SAMSUNG, no panel driver), which is how
+#      Google ships it: out of tree, loaded at runtime.
+#   4. Nothing claims the screen. The bootloader's logo stays on an otherwise
+#      dead panel, the watchdog fires, the device reboots -- back to the logo.
+#
+# That is why v0.2.2 through v0.2.5 all failed identically: KASAN, lz4 framing
+# and RD_GZIP each changed something real, but the display path was never
+# reachable in any of them, so the symptom never moved.
+#
+# MODULE_UNLOAD / MODVERSIONS / MODULE_SIG need no separate handling: the
+# fragment never cancels them (they are simply unreachable while
+# INTEGRATE_MODULES is set), so once MODULES becomes visible gki-stock_defconfig
+# restores them on its own. That matters for module loading, because those
+# flags are part of a module's vermagic -- the ROM's reads
+# "SMP preempt mod_unload modversions aarch64" and ours read "SMP preempt
+# aarch64", which a vendor .ko rejects with -ENOEXEC. (The version prefix
+# itself is not compared: same_magic() skips past the first space whenever the
+# module carries __versions, which every ROM module does.)
+./scripts/config --file .config --disable INTEGRATE_MODULES --enable MODULES
+
 # Finalize config (resolves all deps and defaults).
 make O= may-sync-config= olddefconfig
 
@@ -627,11 +739,54 @@ fi
 # Verify the device fragment actually merged. Without it the build is a
 # generic GKI kernel carrying none of the Tensor device options, which
 # is precisely what produced run #110's LWIS / Mali GPU / BCL /
-# modem_notifier failures. INTEGRATE_MODULES is set only by
-# zuma_defconfig and is the option that most changes how the build
-# behaves -- it forces MODULES=n -- so it makes a good canary.
-if ! grep -q '^CONFIG_INTEGRATE_MODULES=y' .config; then
+# modem_notifier failures.
+#
+# The canary used to be CONFIG_INTEGRATE_MODULES=y, because it is set only by
+# zuma_defconfig -- but that option is the reason module loading was off, so
+# the check was actively demanding the broken state and would have failed the
+# build the moment the real problem was fixed. BOARD_RIPCURRENT is set only by
+# zuma_defconfig (line 749), is absent from gki-stock_defconfig entirely, and
+# has always survived olddefconfig, which makes it an equally good canary
+# pointed in the right direction.
+if ! grep -q '^CONFIG_BOARD_RIPCURRENT=y' .config; then
   echo "::error::arch/arm64/configs/zuma_defconfig did not merge into .config; drivers would build with the wrong platform options"
+  exit 1
+fi
+# Module support and the GKI helper plumbing. Both of these failures produce a
+# kernel that flashes cleanly, verifies cleanly, and then sits on the Google
+# logo forever -- and neither announces itself, because Kconfig deletes the
+# symbols silently rather than erroring. They are checked here so the build
+# dies in a second instead of handing back another unbootable zip:
+#
+#   CONFIG_MODULES absent        -> Android cannot finit_module() the
+#                                   vendor_dlkm drivers, starting with the
+#                                   display panel -> no image -> watchdog ->
+#                                   logo loop.
+#   GKI_HIDDEN_* plumbing absent -> DRM_TTM / DRM_GEM_SHMEM_HELPER /
+#                                   GENERIC_PHY_MIPI_DPHY / CEC_CORE never get
+#                                   selected (they have no prompt, so they
+#                                   cannot be switched on by hand either) and
+#                                   the vendor display module has nothing to
+#                                   resolve against when it loads.
+REQUIRED_SYMS="
+CONFIG_MODULES=y
+CONFIG_GKI_HACKS_TO_FIX=y
+CONFIG_GKI_HIDDEN_DRM_CONFIGS=y
+CONFIG_DRM_TTM=y
+CONFIG_DRM_GEM_SHMEM_HELPER=y
+CONFIG_GENERIC_PHY_MIPI_DPHY=y
+CONFIG_CEC_CORE=y
+CONFIG_MODVERSIONS=y
+CONFIG_MODULE_UNLOAD=y
+"
+for sym in ${REQUIRED_SYMS}; do
+  if ! grep -q "^${sym}\$" .config; then
+    echo "::error::required config ${sym} is missing from .config"
+    exit 1
+  fi
+done
+if grep -q '^CONFIG_INTEGRATE_MODULES=y' .config; then
+  echo "::error::CONFIG_INTEGRATE_MODULES is still set; CONFIG_MODULES depends on !INTEGRATE_MODULES, so module loading would be off again and the device cannot boot"
   exit 1
 fi
 # A duplicate-symbol failure only appears at the link stage, after every
@@ -763,16 +918,29 @@ ls -la .config include/config/ include/generated/autoconf.h
 
 echo "=== Building kernel (in-tree) ==="
 
-# The zuma_defconfig fragment sets CONFIG_INTEGRATE_MODULES=y, which
-# forces MODULES=n (kernel/module/Kconfig). Every device driver that
-# layers in through KCONFIG_EXT_ZUMA is therefore compiled straight
-# into the Image instead of being emitted as a .ko. That is the more
-# robust outcome for a flashable zip: there is nothing left to load at
-# boot and no module install path that can be got wrong. It does mean
-# `make modules` has no rule to make, so Image/dtbs is the whole
-# build. The staging block below stays conditional on CONFIG_MODULES
-# so this script still works if the fragment is ever changed to
-# ship modules again.
+# Module support is ON in this config (see the INTEGRATE_MODULES block above),
+# but `make modules` is deliberately NOT part of the build below -- only
+# `Image dtbs` runs. That is a decision, not an accident:
+#
+#   * Every .ko this tree could produce is a copy of a driver the ROM already
+#     ships in vendor_dlkm. DRM_SAMSUNG, DRM_PANEL_SAMSUNG_S6E3HC2,
+#     MFD_S2MPG14/15, PHY_EXYNOS_MIPI_DSIM and SAMSUNG_IOMMU_V9 are all =m in
+#     our config and all completely ABSENT from the known-booting ROM's config
+#     -- Google builds them out of tree and ships them in vendor_dlkm, which
+#     AK3 never touches. Our copies would be duplicates of unknown agreement
+#     with the kernel, and shipping them into the ramdisk's /lib/modules would
+#     put ours in front of modprobe's search path.
+#
+#   * There are ~201 of them. On top of an already large Image that pushes the
+#     repacked boot.img toward the partition limit, and AK3 reports that only
+#     after the entire build has finished.
+#
+# CONFIG_MODULES=y still does the job it exists for: it is what lets Android
+# call finit_module() on the ROM's vendor_dlkm modules at all. Side effect
+# worth noting: gki-stock_defconfig asks for CONFIG_IKHEADERS=m, which was
+# being clamped up to =y while module support was off -- the embedded
+# kheaders.tar.xz is one of the reasons our Image ran ~15 MB over the
+# reference's.
 # MAKE_KEEP_GOING was "-k" for the whole debug phase. 16.0.0-sultan
 # turned out to be a lossy merge carrying several independent source
 # bugs (an undeclared tracepoint export, a missing DECLARE_RWSEM, a
@@ -1028,37 +1196,28 @@ echo "=== Image.lz4 LZ4 Legacy format confirmed (magic ${LZ4_MAGIC}) ==="
 # stable sorted order.
 printf '%s\n' "${DTB_LIST}" | xargs cat > "${AK3_DIR}/dtb"
 ls -la "${AK3_DIR}/Image.lz4" "${AK3_DIR}/dtb"
-# With CONFIG_INTEGRATE_MODULES=y (set by the zuma fragment) the device
-# drivers are built into the Image and no .ko files exist at all. Stage
-# modules only when CONFIG_MODULES=y, so a built-in build skips this
-# cleanly instead of dying on an empty find result -- but keep the
-# zero-module hard error when modules ARE expected, because a silent
-# skip there would ship a kernel missing its WiFi/BT/charging drivers.
-# AK3 re-packs the whole ramdisk from its ramdisk/ dir
-# (ak3-core.sh:266 `find . | cpio`), so anything placed here is merged
-# into the boot image. The modules/ dir is only for KernelSU/Magisk
-# helper modules, NOT for .ko installation, and do.modules=1
-# additionally requires do.systemless=1 -- so keep do.modules=0 and
-# ship any .ko files via the ramdisk instead.
-if grep -q '^CONFIG_MODULES=y' .config; then
-  MODREL="$(cat include/config/kernel.release 2>/dev/null || echo unknown)"
-  RDRAM="${AK3_DIR}/ramdisk"
-  MODDIR="${RDRAM}/lib/modules/${MODREL}"
-  mkdir -p "${MODDIR}"
-  # Best-effort strip: CFI/CFI-kcfi .ko files may not strip cleanly and
-  # that is not fatal, so ignore strip failures but not copy failures.
-  find . -name '*.ko' -not -path './.git/*' -print0 \
-    | xargs -0 -r -n50 llvm-strip --strip-debug 2>/dev/null || true
-  KOCOUNT=$(find . -name '*.ko' -not -path './.git/*' | wc -l)
-  if [ "${KOCOUNT}" -eq 0 ]; then
-    echo "::error::CONFIG_MODULES=y but no .ko modules were built; zuma device drivers (WiFi/BT/charging) would be missing"
-    exit 1
-  fi
-  find . -name '*.ko' -not -path './.git/*' -exec cp {} "${MODDIR}/" \;
-  echo "=== Staged ${KOCOUNT} .ko into ramdisk /lib/modules/${MODREL} ==="
-else
-  echo "=== CONFIG_MODULES=n: drivers are built into the Image, nothing to stage ==="
-fi
+# No .ko files are staged, and that is now unconditional.
+#
+# CONFIG_MODULES=y in this build -- it was ABSENT before, which is what stopped
+# the phone from booting -- but `make modules` is never run, so the find below
+# would return nothing and the old zero-module hard error would fire on a build
+# behaving exactly as designed.
+#
+# Staging would be the wrong answer anyway. The .ko files this tree could build
+# are our own copies of drivers the ROM already ships in vendor_dlkm (Samsung
+# display, S2MPG14 PMIC, MIPI DSI PHY, ...), and AK3 rewrites only boot.img --
+# vendor_dlkm is left exactly as Google shipped it. Dropping ours into the
+# ramdisk's /lib/modules/<release>/ would give the device two copies of every
+# such driver, and modprobe searches /lib/modules first, so it would prefer
+# ours over the ones the image was built and tested with.
+#
+# AK3 re-packs the whole ramdisk from its ramdisk/ dir (ak3-core.sh:266
+# `find . | cpio`), so anything placed there is merged into the boot image --
+# which is precisely why nothing is placed there. do.modules=0 in anykernel.sh
+# is the other half of the same decision: the modules/ dir is for
+# KernelSU/Magisk helper modules rather than .ko installation, and
+# do.modules=1 additionally requires do.systemless=1.
+echo "=== CONFIG_MODULES=y: kernel accepts modules; vendor drivers come from vendor_dlkm, nothing to stage ==="
 
 cat > "${AK3_DIR}/anykernel.sh" << 'AKEOF'
 ### AnyKernel3 Ramdisk Mod Script
