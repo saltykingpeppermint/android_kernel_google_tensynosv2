@@ -426,16 +426,42 @@ grep -n -B1 -A2 'edgetpu-trace\.o' "${ET_KB}" 2>/dev/null || true
 # built-in path, which definitely runs at boot -- and no init_module
 # symbol exists to collide. This CI never builds a .ko (only
 # `make Image dtbs`), so nothing needs -DMODULE.
+#
+# Dropping it alone is not enough, though. module.h:198-202:
+#
+#   #ifdef MODULE
+#   #define MODULE_FILE
+#   #else
+#   #define MODULE_FILE MODULE_INFO(file, KBUILD_MODFILE);
+#
+# so with MODULE undefined every MODULE_LICENSE() expands to
+# `= "file=" KBUILD_MODFILE`, and KBUILD_MODFILE is supplied by
+# modfile_flags (scripts/Makefile.lib:147), which modkern_cflags
+# (line 235-238) only adds on the NON-module branch. These objects are
+# still obj-m, so they take the module branch and never receive it:
+#
+#   edgetpu-fs.c:2008:1: error: expected ';' after top level declarator
+#   callisto-platform.c:186:1: error: expected ';' after top level declarator
+#
+# (both lines are MODULE_LICENSE("GPL") -- MODULE_LICENSE is the only
+# macro that uses MODULE_FILE, which is why nothing else broke).
+# Substitute __FILE__, which is already a string literal and needs no
+# shell quoting, so the concatenation parses. Its value is irrelevant:
+# no .modinfo consumer runs here.
 if ! grep -qE '^KBUILD_CFLAGS_MODULE[[:space:]]*:=[[:space:]]*-DMODULE[[:space:]]*$' Makefile \
    || ! grep -qE '^KBUILD_AFLAGS_MODULE[[:space:]]*:=[[:space:]]*-DMODULE[[:space:]]*$' Makefile; then
   echo "::error::KBUILD_{C,A}FLAGS_MODULE := -DMODULE not found in Makefile; module objects would keep the init_module alias and collide at link"
   exit 1
 fi
-echo "=== Dropping -DMODULE from KBUILD_CFLAGS_MODULE / KBUILD_AFLAGS_MODULE ==="
-sed -E 's#^KBUILD_(C|A)FLAGS_MODULE[[:space:]]*:=[[:space:]]*-DMODULE[[:space:]]*$#KBUILD_\1FLAGS_MODULE  :=#' \
+echo "=== Replacing -DMODULE with -DKBUILD_MODFILE=__FILE__ in KBUILD_*FLAGS_MODULE ==="
+sed -E 's#^KBUILD_(C|A)FLAGS_MODULE[[:space:]]*:=[[:space:]]*-DMODULE[[:space:]]*$#KBUILD_\1FLAGS_MODULE  := -DKBUILD_MODFILE=__FILE__#' \
      Makefile > Makefile.tmp && mv Makefile.tmp Makefile
 if grep -qE '^KBUILD_(C|A)FLAGS_MODULE[[:space:]]*:=[[:space:]]*-DMODULE' Makefile; then
   echo "::error::could not drop -DMODULE from KBUILD_*FLAGS_MODULE; final link would hit 'duplicate symbol: init_module'"
+  exit 1
+fi
+if ! grep -qE '^KBUILD_CFLAGS_MODULE[[:space:]]*:=[[:space:]]*-DKBUILD_MODFILE=__FILE__[[:space:]]*$' Makefile; then
+  echo "::error::KBUILD_MODFILE not substituted; MODULE_LICENSE() would fail with 'expected .;. after top level declarator'"
   exit 1
 fi
 grep -nE '^KBUILD_(C|A)FLAGS_MODULE' Makefile || true
