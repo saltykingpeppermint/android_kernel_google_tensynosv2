@@ -166,6 +166,56 @@ if ! grep -qE '^[[:space:]]*source[[:space:]]+"init/Kconfig\.gki"' init/Kconfig;
   exit 1
 fi
 
+# ---------------------------------------------------------------------------
+# Move Kconfig's `modules` property from INTEGRATE_MODULES onto MODULES.
+#
+# scripts/kconfig/symbol.c keeps exactly one modules_sym -- the single symbol
+# carrying Kconfig's `modules` property -- and consults it to decide whether
+# the tristate value `m` may exist at all:
+#
+#     41: struct symbol *modules_sym;
+#    704: * For tristate symbol handle the modules=n case
+#    747: /* transpose mod to yes if modules are not enabled */
+#    749:     if (!sym_is_choice_value(sym) && modules_sym->curr.tri == no)
+#
+# This tree puts that property on INTEGRATE_MODULES (kernel/module/Kconfig:5)
+# and NOT on MODULES (:25-44). So while INTEGRATE_MODULES=y every `=m` in a
+# defconfig survives -- which is how the shipped v0.2.5 config carried 201 of
+# them -- and the moment INTEGRATE_MODULES is turned off, modules_val becomes
+# no and Kconfig silently transposes EVERY tristate `m` to `y`.
+#
+# That is precisely what run #133 did to us. Disabling INTEGRATE_MODULES to
+# make CONFIG_MODULES visible left modules_val=no, so CONFIG_GS_ACPM came out
+# `y` instead of `m`. GS_ACPM=y builds acpm.o as a built-in object, and
+# google-modules/soc/gs/drivers/soc/google/acpm/fw_header/framework.h only
+# includes the header defining `struct build_info` under
+# #ifdef CONFIG_GS_ACPM_MODULE -- hence "field has incomplete type
+# 'struct build_info'". The same transposition was also silently promoting the
+# other ~200 module symbols to built-in, which would have shipped a monolithic
+# kernel resembling neither the ROM nor anything that has ever booted.
+#
+# parser.y:222 refuses a second `modules` property ("redefines option
+# 'modules'"), so it has to be MOVED, never copied. And it has to move before
+# the first `make`: `make gki-stock_defconfig` below is itself a Kconfig
+# resolution pass, so it transposes gki-stock's `=m` entries (CONFIG_IKHEADERS=m
+# among them) on the spot if the property is still missing at that point.
+#
+# MODULES is the symbol it belongs on -- it is the one we set to =y, and its
+# modules_val=yes is what keeps tristate `m` representable for the whole tree.
+# ---------------------------------------------------------------------------
+KMOD_CFG="kernel/module/Kconfig"
+if [ -f "${KMOD_CFG}" ]; then
+  sed -i -E '/^[[:space:]]*modules[[:space:]]*$/d' "${KMOD_CFG}"
+  sed -i 's|^\([[:space:]]*\)bool "Enable loadable module support"|\1bool "Enable loadable module support"\n\1modules|' "${KMOD_CFG}"
+fi
+MOD_PROP_COUNT="$(grep -cE '^[[:space:]]*modules[[:space:]]*$' "${KMOD_CFG}" 2>/dev/null || true)"
+MOD_PROMPT_LINE="$(grep -n 'bool "Enable loadable module support"' "${KMOD_CFG}" 2>/dev/null | head -n1 | cut -d: -f1)"
+MOD_PROP_LINE="$(grep -nE '^[[:space:]]*modules[[:space:]]*$' "${KMOD_CFG}" 2>/dev/null | head -n1 | cut -d: -f1)"
+if [ "${MOD_PROP_COUNT}" != "1" ] || [ -z "${MOD_PROMPT_LINE}" ] || [ -z "${MOD_PROP_LINE}" ] || [ "${MOD_PROP_LINE}" -le "${MOD_PROMPT_LINE}" ]; then
+  echo "::error::the Kconfig 'modules' property is not sitting on CONFIG_MODULES (count=${MOD_PROP_COUNT}, prop=${MOD_PROP_LINE}, prompt=${MOD_PROMPT_LINE}); Kconfig would transpose every tristate =m to =y and build the whole tree as built-in"
+  exit 1
+fi
+
 # Copy modified source files from our repo
 cp "${OUR_REPO_DIR}/google-modules/bluetooth/broadcom/nitrous.c" \
    google-modules/bluetooth/broadcom/nitrous.c
@@ -789,6 +839,29 @@ if grep -q '^CONFIG_INTEGRATE_MODULES=y' .config; then
   echo "::error::CONFIG_INTEGRATE_MODULES is still set; CONFIG_MODULES depends on !INTEGRATE_MODULES, so module loading would be off again and the device cannot boot"
   exit 1
 fi
+# Whether Kconfig considers `m` a legal value, measured directly. symbol.c:747
+# transposes tristate `m` to `y` whenever modules_sym evaluates to no, so a
+# healthy config carries well over a hundred CONFIG_*=m lines (the ROM's has
+# ~100; zuma_defconfig alone asks for 201) and a transposed one carries none.
+# One check covers the whole failure class: GS_ACPM=y is what actually broke
+# run #133, but the same rule was converting the other 200 module symbols to
+# built-in at the same time, which no per-symbol guard would have caught.
+MOD_COUNT="$(grep -cE '=m$' .config || true)"
+MOD_COUNT="${MOD_COUNT:-0}"
+if [ "${MOD_COUNT}" -lt 50 ]; then
+  echo "::error::only ${MOD_COUNT} CONFIG_*=m entries in .config (expected >100). Kconfig transposed every tristate m to y because the 'modules' property is not evaluating to yes, so every module driver would build as built-in"
+  exit 1
+fi
+# The specific failure that transposition produced: GS_ACPM=y compiles acpm.o
+# as a built-in object, but acpm/fw_header/framework.h only includes common.h
+# under CONFIG_GS_ACPM_MODULE, and common.h is what defines struct build_info.
+# zuma_defconfig asks for =m, where the driver is inert anyway -- we never run
+# `make modules`, and the ROM carries no GS_ACPM symbol at all.
+if grep -q '^CONFIG_GS_ACPM=y' .config; then
+  echo "::error::CONFIG_GS_ACPM=y (built-in); acpm/fw_header/framework.h only includes common.h under CONFIG_GS_ACPM_MODULE, so struct build_info is incomplete and compilation fails"
+  exit 1
+fi
+echo "::notice::module config state: $(grep -E '^(CONFIG_MODULES|CONFIG_INTEGRATE_MODULES|CONFIG_GS_ACPM|CONFIG_IKHEADERS)=' .config | tr '\n' ' ' || true) CONFIG_*=m count: ${MOD_COUNT}"
 # A duplicate-symbol failure only appears at the link stage, after every
 # .c file in the tree has compiled -- roughly a 30-minute cycle to
 # discover for a one-line config problem. Catch it here instead.
