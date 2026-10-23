@@ -369,10 +369,10 @@ if [ -f "${ET_KB}" ] && grep -q 'ifdef[[:space:]]*CONFIG_EDGETPU_TELEMETRY_TRACE
 fi
 grep -n -B1 -A2 'edgetpu-trace\.o' "${ET_KB}" 2>/dev/null || true
 
-# Build the two gcip drivers as genuine built-in objects.
+# Do not define MODULE for module objects.
 #
-# google-modules/Makefile force-links them into vmlinux whenever
-# CONFIG_SOC_ZUMA is set, naming the object paths directly:
+# google-modules/Makefile force-links two drivers into vmlinux under
+# CONFIG_SOC_ZUMA, naming the object paths directly:
 #
 #   ifdef CONFIG_SOC_ZUMA
 #   gcip-drivers := \
@@ -380,7 +380,7 @@ grep -n -B1 -A2 'edgetpu-trace\.o' "${ET_KB}" 2>/dev/null || true
 #   	gxp/zuma/gxp.o
 #   obj-y += $(gcip-drivers)
 #
-# but each driver's own Kbuild declares itself a module:
+# while each driver's own Kbuild still declares itself a module:
 #
 #   edgetpu/rio/drivers/edgetpu/Kbuild:15  obj-$(CONFIG_RIO) += rio.o
 #   gxp/zuma/Makefile:20                   obj-$(CONFIG_$(GXP_CHIP)) += gxp.o
@@ -389,14 +389,14 @@ grep -n -B1 -A2 'edgetpu-trace\.o' "${ET_KB}" 2>/dev/null || true
 # KBUILD_CFLAGS_MODULE = -DMODULE (top-level Makefile:616, selected by
 # the `part-of-module` test in scripts/Makefile.lib:232-238). While
 # CONFIG_INTEGRATE_MODULES=y that was harmless: include/linux/module.h:81
-# took the first branch and module_init() became a per-module initcall
-# with a unique section name. INTEGRATE_MODULES must now be off --
-# MODULES depends on !INTEGRATE_MODULES, and CONFIG_MODULES=y is itself
-# required for this kernel to boot -- so module.h:145-152 applies
-# instead and defines the plain loadable-module aliases:
+# took the first branch and module_init() became a uniquely-named
+# initcall. INTEGRATE_MODULES must now be off -- MODULES depends on
+# !INTEGRATE_MODULES, and CONFIG_MODULES=y is required for this kernel
+# to boot -- so module.h:145-152 applies instead and defines the plain
+# loadable-module aliases:
 #
-#   int   init_module(void)   __copy(initfn) __attribute__((alias(#initfn)));
-#   void  cleanup_module(void) __copy(exitfn) __attribute__((alias(#exitfn)));
+#   int  init_module(void)   __copy(initfn) __attribute__((alias(#initfn)));
+#   void cleanup_module(void) __copy(exitfn) __attribute__((alias(#exitfn)));
 #
 # Two such objects inside vmlinux.a collide at the final link:
 #
@@ -405,43 +405,40 @@ grep -n -B1 -A2 'edgetpu-trace\.o' "${ET_KB}" 2>/dev/null || true
 #   >>> defined at callisto-platform.c:168 gxp.o:(.init.text+0x4)
 #   ld.lld: error: duplicate symbol: cleanup_module
 #
-# That branch emits NO __initcall at all, so even if it had linked,
-# neither driver would ever have been initialised. Declaring both
-# obj-y drops -DMODULE from their cflags and makes module_init()
-# expand to __initcall() (module.h:102), the normal built-in path.
+# That same branch emits NO __initcall at all, so even had it linked,
+# neither the Tensor TPU nor the GXP driver would ever have been
+# initialised.
 #
-# Parent linkage is untouched: google-modules/Makefile lists the object
-# paths, not the directories, so only the compile flags change and
-# nothing is added to vmlinux twice.
-GCIP_KB="google-modules/edgetpu/rio/drivers/edgetpu/Kbuild"
-GCIP_MK="google-modules/gxp/zuma/Makefile"
-if [ ! -f "${GCIP_KB}" ]; then
-  echo "::error::${GCIP_KB} not found; cannot drop -DMODULE from rio.o"
+# Two fixes were rejected first:
+#   * Saying obj-y in those Kbuilds drops -DMODULE, but
+#     google-modules/Makefile:110 hijacks $(obj)/%.o with a
+#     .gcip_defs.h prerequisite and re-enters the subdirectory, where
+#     an obj-y composite yields:
+#       make[4]: *** No rule to make target '.../edgetpu/rio.o'. Stop.
+#   * Defining CONFIG_INTEGRATE_MODULES by hand would silence the
+#     alias but switch module_init() to module.h:96's .rodata initcall,
+#     whose initcall walker is not present unless the real config is
+#     set -- the drivers would link and silently never run.
+#
+# Dropping -DMODULE keeps the proven obj-m build path (it reaches the
+# final link today) while making module.h:81 see !defined(MODULE), so
+# module_init() expands to __initcall() (module.h:102) -- the standard
+# built-in path, which definitely runs at boot -- and no init_module
+# symbol exists to collide. This CI never builds a .ko (only
+# `make Image dtbs`), so nothing needs -DMODULE.
+if ! grep -qE '^KBUILD_CFLAGS_MODULE[[:space:]]*:=[[:space:]]*-DMODULE[[:space:]]*$' Makefile \
+   || ! grep -qE '^KBUILD_AFLAGS_MODULE[[:space:]]*:=[[:space:]]*-DMODULE[[:space:]]*$' Makefile; then
+  echo "::error::KBUILD_{C,A}FLAGS_MODULE := -DMODULE not found in Makefile; module objects would keep the init_module alias and collide at link"
   exit 1
 fi
-if [ ! -f "${GCIP_MK}" ]; then
-  echo "::error::${GCIP_MK} not found; cannot drop -DMODULE from gxp.o"
+echo "=== Dropping -DMODULE from KBUILD_CFLAGS_MODULE / KBUILD_AFLAGS_MODULE ==="
+sed -E 's#^KBUILD_(C|A)FLAGS_MODULE[[:space:]]*:=[[:space:]]*-DMODULE[[:space:]]*$#KBUILD_\1FLAGS_MODULE  :=#' \
+     Makefile > Makefile.tmp && mv Makefile.tmp Makefile
+if grep -qE '^KBUILD_(C|A)FLAGS_MODULE[[:space:]]*:=[[:space:]]*-DMODULE' Makefile; then
+  echo "::error::could not drop -DMODULE from KBUILD_*FLAGS_MODULE; final link would hit 'duplicate symbol: init_module'"
   exit 1
 fi
-if grep -qE '^[[:space:]]*obj-\$\(CONFIG_RIO\)[[:space:]]*\+=[[:space:]]*rio\.o[[:space:]]*$' "${GCIP_KB}"; then
-  echo "=== rio.o: obj-\$(CONFIG_RIO) -> obj-y (built-in, no -DMODULE) ==="
-  sed -E 's|^[[:space:]]*obj-\$\(CONFIG_RIO\)[[:space:]]*\+=[[:space:]]*rio\.o[[:space:]]*$|obj-y\t+= rio.o|' \
-       "${GCIP_KB}" > "${GCIP_KB}.tmp" && mv "${GCIP_KB}.tmp" "${GCIP_KB}"
-fi
-if grep -qE '^[[:space:]]*obj-\$\(CONFIG_\$\(GXP_CHIP\)\)[[:space:]]*\+=[[:space:]]*gxp\.o[[:space:]]*$' "${GCIP_MK}"; then
-  echo "=== gxp.o: obj-\$(CONFIG_\$(GXP_CHIP)) -> obj-y (built-in, no -DMODULE) ==="
-  sed -E 's|^[[:space:]]*obj-\$\(CONFIG_\$\(GXP_CHIP\)\)[[:space:]]*\+=[[:space:]]*gxp\.o[[:space:]]*$|obj-y\t+= gxp.o|' \
-       "${GCIP_MK}" > "${GCIP_MK}.tmp" && mv "${GCIP_MK}.tmp" "${GCIP_MK}"
-fi
-if ! grep -qE '^[[:space:]]*obj-y[[:space:]]*\+=[[:space:]]*rio\.o[[:space:]]*$' "${GCIP_KB}"; then
-  echo "::error::rio.o is not obj-y; final link would hit 'duplicate symbol: init_module'"
-  exit 1
-fi
-if ! grep -qE '^[[:space:]]*obj-y[[:space:]]*\+=[[:space:]]*gxp\.o[[:space:]]*$' "${GCIP_MK}"; then
-  echo "::error::gxp.o is not obj-y; final link would hit 'duplicate symbol: init_module'"
-  exit 1
-fi
-grep -nE '^[[:space:]]*obj-(y|m|\$\(CONFIG)' "${GCIP_KB}" "${GCIP_MK}" || true
+grep -nE '^KBUILD_(C|A)FLAGS_MODULE' Makefile || true
 
 # Apply build configs
 if [ "${ENABLE_KSU}" = "true" ]; then
