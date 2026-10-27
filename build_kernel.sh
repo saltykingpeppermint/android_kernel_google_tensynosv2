@@ -530,7 +530,7 @@ Features:
   - KernelSU Next (root)
   - Bluetooth power saving excluded
   - WiFi power saving excluded
-  - Restart retry (10 attempts)
+  - Restart retry (20 attempts)
   - Compatible with Google Stock ROMs
   - Compatible with AOSP/LineageOS
 EOF

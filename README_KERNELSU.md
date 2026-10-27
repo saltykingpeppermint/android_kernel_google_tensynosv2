@@ -17,7 +17,7 @@ Custom kernel for Google Pixel 8 series (Tensor G3/zuma) with KernelSU Next root
 - These are software workarounds for hardware/firmware limitations
 
 ### 🔄 Enhanced Restart Reliability
-- **10 restart retry attempts** with 1-second delay between attempts
+- **20 restart retry attempts** with 500 ms delay between attempts
 - Logs each restart attempt for debugging
 - Prevents boot loops from transient restart failures
 

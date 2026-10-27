@@ -2,10 +2,10 @@ name: Build Tensor G3 Kernel (zuma)
 
 on:
   push:
-    branches: [main, master, 16.0.0-sultan]
+    branches: [main, master, 17.0.0-cp2a]
     tags: ['v*']
   pull_request:
-    branches: [main, master, 16.0.0-sultan]
+    branches: [main, master, 17.0.0-cp2a]
   workflow_dispatch:
     inputs:
       build_type:
@@ -66,8 +66,8 @@ jobs:
 
       - name: Clone full kernel source
         run: |
-          git clone --depth=1 -b 16.0.0-sultan \
-            https://github.com/kerneltoast/android_kernel_google_tensynos.git \
+          git clone --depth=1 -b 17.0.0-cp2a \
+            https://github.com/Ante0/android_kernel_google_tensynos.git \
             ${{ env.KERNEL_SRC_DIR }}
 
       - name: Checkout KernelSU Next

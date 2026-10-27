@@ -31,8 +31,8 @@
  * reset (machine_restart() returns), re-attempt the restart this many times
  * before giving up.
  */
-#define MAX_RESTART_RETRIES		10
-#define RESTART_RETRY_DELAY_MS		1000
+#define MAX_RESTART_RETRIES		20
+#define RESTART_RETRY_DELAY_MS		500
 
 static int C_A_D = 1;
 struct pid *cad_pid;
