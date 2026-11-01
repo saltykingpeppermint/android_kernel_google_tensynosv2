@@ -51,6 +51,16 @@ jobs:
       fail-fast: false
       matrix:
         build_type: [release, debug]
+        include:
+          # release = Sultan-parity config (his exact shipped .config from
+          # this tree, extracted via IKCONFIG) -- the leg that produces the
+          # flashable zip attached to a release. debug = the legacy
+          # gki-stock_defconfig + zuma_defconfig merge, kept for config
+          # diffing against the parity build.
+          - build_type: release
+            kernel_mode: sultan
+          - build_type: debug
+            kernel_mode: legacy
 
     steps:
       - name: Setup Node.js 20 (for actions/checkout@v4)
@@ -85,7 +95,9 @@ jobs:
           # lz4 is required by the packaging step: AnyKernel3 ships the
           # kernel Image compressed, and the reference build that this
           # layout matches uses Image.lz4 rather than a raw Image.
-          sudo apt-get install -y bc bison build-essential ccache cpio flex \
+          # dwarves supplies pahole, needed by the Sultan-parity config
+          # (the release leg) which builds with CONFIG_DEBUG_INFO_BTF=y.
+          sudo apt-get install -y bc bison build-essential ccache cpio dwarves flex \
             git libelf-dev libncurses5-dev libssl-dev lz4 python3-full \
             python3-dev unzip wget zip zlib1g-dev lld \
             gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
@@ -108,6 +120,7 @@ jobs:
         # and puts the AK3 heredoc at column 0 with no block-indent games.
         env:
           BUILD_TYPE: ${{ matrix.build_type }}
+          KERNEL_MODE: ${{ matrix.kernel_mode }}
         run: bash "${OUR_REPO_DIR}/.github/scripts/build.sh"
 
       - name: Upload artifacts

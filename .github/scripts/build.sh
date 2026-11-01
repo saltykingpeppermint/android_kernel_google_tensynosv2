@@ -558,6 +558,115 @@ export KBUILD_OUTPUT=
 
 echo "=== Generating .config (in-tree) ==="
 
+if [ "${KERNEL_MODE:-legacy}" = "sultan" ]; then
+
+# ===========================================================================
+# KERNEL_MODE=sultan (release leg): Sultan-parity config generation.
+#
+# Why this exists: the legacy merge path (gki-stock_defconfig +
+# zuma_defconfig) compiled clean, packaged clean, and still hung at the
+# Google logo on device (v0.2.5/v0.2.6, runs #138/#139). Meanwhile Sultan
+# publishes a kernel built from this very tree (Ante0 17.0.0-cp2a) that
+# boots on the same ROM. His published zip embeds his final .config in
+# the Image via CONFIG_IKCONFIG, and this repo's extract-ikconfig
+# tooling pulled it out. The release leg now builds HIS configuration
+# instead of our merge, so "our kernel" stops being a hypothesis about
+# what a booting config looks like and becomes a measured one.
+#
+# What his config actually is (decoded from the extraction):
+#   * Pure GKI core kernel. Not one zuma device Kconfig is set: no
+#     CONFIG_KCONFIG_EXT_ZUMA, no NITROUS, no BCM4389, no EXYNOS_PM_QOS,
+#     no GSA, no BTS, no ARM_TENSOR_AIO_DEVFREQ, and zero
+#     soc-gs/zuma driver symbols. Every device driver on the device
+#     loads from vendor_dlkm as a .ko.
+#   * MODULES=y + MODVERSIONS=y, and the INTEGRATE_MODULES symbol is
+#     absent entirely -- the shape we spent runs fighting for by hand.
+#   * LTO_NONE, KASAN=y + KASAN_HW_TAGS=y (hardware MTE), WERROR=y,
+#     DEBUG_INFO_BTF=y, GKI_HACKS_TO_FIX=y + the GKI_HIDDEN_* umbrellas
+#     (which is why the init/Kconfig.gki un-gating earlier in this file
+#     is REQUIRED for this mode too: without it those umbrella symbols
+#     vanish from .config on the first olddefconfig and diverge from
+#     his Image).
+#
+# Consequence for the fork's BT/WiFi power-save fixes: the nitrous.c and
+# bcm4389 Kbuild hooks staged above only compile when those drivers are
+# built in-tree, which his config never does. Under sultan parity they
+# are compile-inert; they bind in a later phase by rebuilding those
+# vendor modules from this same tree and shipping them via the AnyKernel
+# zip. The fork fix that DOES compile and ship in this mode is
+# kernel/reboot.c (restart retry: 20 attempts @ 500 ms).
+#
+# Deliberate deviation from his shipped config -- exactly one:
+#   CONFIG_TRIM_UNUSED_KSYMS=n. His build trims the kernel's exported
+#   symbol table against Google's KMI whitelist, which lives on Google's
+#   build machine (the path is even baked into his config) and does not
+#   exist on this runner. gen_autoksyms.sh would fail or silently no-op
+#   against that dead path. Trimming is an export *restriction*: with it
+#   off this kernel exports a strict superset of his symbol list, so
+#   every vendor_dlkm module still resolves every symbol it references.
+#   MODVERSIONS CRCs are computed from source-level types, not from the
+#   export set, so they are unaffected.
+# Everything else is copied verbatim. The tracked copy lives at
+# .github/configs/sultan_17.0.0-cp2a.config and must stay byte-identical
+# to what extract-ikconfig produced from his Image.lz4, any drift there
+# is a config bug, not a customization.
+# ===========================================================================
+SULTAN_CFG="${REPO_ROOT}/.github/configs/sultan_17.0.0-cp2a.config"
+if [ ! -s "${SULTAN_CFG}" ]; then
+  echo "::error::Sultan base config missing at ${SULTAN_CFG}; it is extracted from his published Image.lz4 via the repo's extract-ikconfig tooling"
+  exit 1
+fi
+cp "${SULTAN_CFG}" .config
+./scripts/config --file .config --disable TRIM_UNUSED_KSYMS
+
+make O= may-sync-config= olddefconfig
+
+# Guard: module support must survive (vendor_dlkm .ko files cannot load
+# otherwise) and INTEGRATE_MODULES must stay dark -- his kernel has no
+# such symbol at all. If the tree's Kconfig default resurrects it, disable
+# it once and re-evaluate; a second resurrection means the modules-property
+# surgery above no longer matches this tree and needs looking at, so fail
+# loudly rather than ship the exact mismatch that broke v0.2.6.
+if ! grep -q '^CONFIG_MODULES=y' .config; then
+  echo "::error::CONFIG_MODULES lost during olddefconfig; without module support the ROM's vendor_dlkm drivers cannot load"
+  exit 1
+fi
+if grep -q '^CONFIG_INTEGRATE_MODULES=y' .config; then
+  ./scripts/config --file .config --disable INTEGRATE_MODULES
+  make O= may-sync-config= olddefconfig
+  if grep -q '^CONFIG_INTEGRATE_MODULES=y' .config; then
+    echo "::error::INTEGRATE_MODULES resurrected despite --disable; Sultan's shipped kernel has no such symbol, so kernel/module/Kconfig no longer matches the moved modules-property"
+    exit 1
+  fi
+fi
+if grep -q '^CONFIG_TRIM_UNUSED_KSYMS=y' .config; then
+  echo "::error::CONFIG_TRIM_UNUSED_KSYMS re-enabled by olddefconfig; autoksyms trimming would run against the Google-internal whitelist path that does not exist on this runner"
+  exit 1
+fi
+# Parity spot-checks against the base config itself. These are the boot
+# and size killers from the legacy attempts (software KASAN doubled the
+# kernel; a missing initramfs decompressor stranded the boot right after
+# the logo). Verified here instead of after a 20 minute compile.
+for sym in KASAN_HW_TAGS RD_GZIP RD_ZSTD DECOMPRESS_GZIP ARM64_MTE \
+           CC_OPTIMIZE_FOR_PERFORMANCE LTO_NONE GKI_HACKS_TO_FIX; do
+  if ! grep -q "^CONFIG_${sym}=y" .config; then
+    echo "::error::CONFIG_${sym} lost during olddefconfig; Sultan's shipped kernel has it enabled -- the un-gated Kconfig or symbol dependency needs checking"
+    exit 1
+  fi
+done
+# BTF is =y in his config and link-vmlinux goes through pahole; if the
+# runner lacks it, the failure lands ~20 minutes in with no actionable
+# message instead of here at config time.
+if grep -q '^CONFIG_DEBUG_INFO_BTF=y' .config && ! command -v pahole >/dev/null 2>&1; then
+  echo "::error::CONFIG_DEBUG_INFO_BTF=y but pahole is not installed; add 'dwarves' to the runner's apt package list in build.yml"
+  exit 1
+fi
+echo "=== =m symbols (modules; informational) ==="
+grep -c '=m$' .config || true
+echo "=== sultan parity config ready ==="
+
+else
+
 # `may-sync-config=` passed on the command line OVERRIDES the
 # Makefile's own `may-sync-config := 1` (lines 330/347/352 are plain
 # `:=`, not `override`), so `ifdef may-sync-config` (line 828) is
@@ -1140,6 +1249,8 @@ for sym in BLUETOOTH_POWERSAVE_EXCLUDE WIFI_POWERSAVE_EXCLUDE; do
 done
 echo "=== =m symbols (modules; informational) ==="
 grep -c '=m$' .config || true
+
+fi  # KERNEL_MODE branch: release = Sultan-parity config, debug = legacy merge
 
 # Generate auto.conf / auto.conf.cmd / autoconf.h. This MUST go
 # through make rather than invoking `conf` directly: Kconfig.include
