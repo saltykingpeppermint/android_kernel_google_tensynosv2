@@ -466,6 +466,64 @@ if ! grep -qE '^KBUILD_CFLAGS_MODULE[[:space:]]*:=[[:space:]]*-DKBUILD_MODFILE=_
 fi
 grep -nE '^KBUILD_(C|A)FLAGS_MODULE' Makefile || true
 
+# Do not build the Tensor TPU and GXP (gcip) drivers at all.
+#
+# Run #137 cleared every compile error but failed the FINAL vmlinux link:
+#
+#   ld.lld: error: undefined symbol: bts_add_scenario / bts_del_scenario
+#     / bts_get_scenindex       <- rio.o (mobile-soc-gsx01.c call sites)
+#   ld.lld: error: undefined symbol: gsa_send_tpu_cmd / gsa_send_dsp_cmd
+#     / gsa_unload_dsp_fw_image <- gxp.o
+#   ld.lld: error: undefined symbol: google_init_tpu_ratio
+#     / register_tpu_thermal_pause_cb <- rio.o
+#   ld.lld: error: undefined symbol: exynos_pm_qos_read_req_value
+#     / exynos_pm_qos_remove_notifier <- rio.o, gxp.o, tensor_aio.o
+#
+# The consumers ended up in vmlinux, but the providers are modular in
+# zuma_defconfig (CONFIG_EXYNOS_BTS=m, CONFIG_GSA=m, CONFIG_EXYNOS_PM_QOS=m)
+# and this CI never compiles a .ko, so the symbols do not exist at link
+# time. ld.lld stops at its default error limit, so the list above is
+# what surfaced, not necessarily exhaustive.
+#
+# The known-booting ROM kernel carries NONE of these symbols: on the stock
+# device the TPU / GXP / AIO-devfreq code ships as vendor_dlkm modules
+# loaded by Android at runtime, not as part of boot.img. Leaving them out
+# matches a kernel that boots; forcing the whole provider chain built-in
+# would be the larger, riskier change.
+#
+# This line is what pulls rio.o and gxp.o into the build. Nothing else
+# requests them: obj-m objects are only compiled when KBUILD_MODULES is
+# set, and `make Image dtbs` does not set it, so commenting out the
+# force-link removes both drivers completely. The gcip machinery further
+# down in this Makefile (the gcip.o rules, .gcip_defs.h generation and
+# the $(obj)/%.o hijack) becomes inert once these two targets are gone.
+#
+#   gcip-drivers := \
+#   	edgetpu/rio/drivers/edgetpu/rio.o \
+#   	gxp/zuma/gxp.o
+#   obj-y += $(gcip-drivers)
+GM_MK="google-modules/Makefile"
+if [ ! -f "${GM_MK}" ]; then
+  echo "::error::${GM_MK} not found; cannot stop the gcip drivers from being force-linked into vmlinux"
+  exit 1
+fi
+if ! grep -qE '^obj-y[[:space:]]*\+=[[:space:]]*.*gcip-drivers' "${GM_MK}"; then
+  echo "::error::expected 'obj-y += \$(gcip-drivers)' in ${GM_MK}; unpatched, the TPU/GXP objects are force-linked and the final vmlinux link fails with undefined bts_*/gsa_*/exynos_pm_qos_* symbols"
+  exit 1
+fi
+echo "=== Not force-linking the gcip (TPU/GXP) drivers into vmlinux ==="
+sed -E 's|^obj-y[[:space:]]*\+=[[:space:]]*.*gcip-drivers.*$|# CI patch: gcip drivers (edgetpu rio, gxp zuma) are not force-linked into vmlinux|' \
+     "${GM_MK}" > "${GM_MK}.tmp" && mv "${GM_MK}.tmp" "${GM_MK}"
+if grep -qE '^obj-y[[:space:]]*\+=[[:space:]]*.*gcip-drivers' "${GM_MK}"; then
+  echo "::error::could not remove the gcip force-link; the final vmlinux link would fail with undefined bts_*/gsa_*/exynos_pm_qos_* symbols"
+  exit 1
+fi
+if ! grep -qF 'CI patch: gcip drivers' "${GM_MK}"; then
+  echo "::error::gcip force-link patch marker missing from ${GM_MK}"
+  exit 1
+fi
+grep -nE '^obj-y|CI patch: gcip' "${GM_MK}" | head -30 || true
+
 # Apply build configs
 if [ "${ENABLE_KSU}" = "true" ]; then
   if ! grep -q "CONFIG_KSU=y" build.config.common; then
@@ -744,6 +802,19 @@ make O= may-sync-config= gki-stock_defconfig
 # shared backing allocator both implementations use, not a competitor.
 ./scripts/config --file .config --disable ZRAM
 
+# The AIO (all-in-one) devfreq driver belongs to the same failure family as
+# the gcip drivers patched above. zuma_defconfig asks for
+# CONFIG_ARM_TENSOR_AIO_DEVFREQ=y, making tensor_aio a built-in consumer of
+# exynos_pm_qos_read_req_value and exynos_pm_qos_remove_notifier, which the
+# same defconfig leaves at CONFIG_EXYNOS_PM_QOS=m. No .ko is compiled here,
+# so run #137's final link found those symbols missing. The known-booting
+# ROM config carries neither tensor_aio nor exynos_pm_qos at all -- runtime
+# power management of that kind lives in vendor_dlkm -- so the consumer is
+# dropped rather than dragging the provider into the image. If a later run
+# surfaces a DIFFERENT exynos_pm_qos consumer, the alternative is to force
+# CONFIG_EXYNOS_PM_QOS=y instead.
+./scripts/config --file .config --disable ARM_TENSOR_AIO_DEVFREQ
+
 # BTF generation is what stopped the build at the FINAL link step,
 # after every source file had already compiled. gki-stock_defconfig
 # sets CONFIG_DEBUG_INFO_BTF=y, and scripts/link-vmlinux.sh's gen_btf()
@@ -965,6 +1036,14 @@ echo "::notice::module config state: $(grep -E '^(CONFIG_MODULES|CONFIG_INTEGRAT
 # Deliberately anchored so CONFIG_ZRAM_GS is not matched.
 if grep -q '^CONFIG_ZRAM=' .config; then
   echo "::error::CONFIG_ZRAM re-enabled alongside CONFIG_ZRAM_GS; both define zcomp_available_algorithm and the link will fail"
+  exit 1
+fi
+# Same symbol-consumer class as ZRAM: tensor_aio must stay out of the build,
+# since it is a built-in consumer of exynos_pm_qos_* that are =m here and
+# never compiled (the run #137 "too many errors" truncation makes a
+# config-time guard the right response).
+if grep -q '^CONFIG_ARM_TENSOR_AIO_DEVFREQ=y' .config; then
+  echo "::error::CONFIG_ARM_TENSOR_AIO_DEVFREQ=y survived olddefconfig; tensor_aio references exynos_pm_qos symbols this CI never compiles, so the final vmlinux link will fail"
   exit 1
 fi
 # Guard against the silent autoksyms killer: this check fires at
